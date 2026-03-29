@@ -2,12 +2,16 @@ import click
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+import time
+import datetime
 
 from cartola_autopick.data_ingestion.api_client import CartolaAPIClient
-from cartola_autopick.data_ingestion.scraper import NewsScraper
 from cartola_autopick.context_engine.profiler import Profiler
 from cartola_autopick.optimizer.knapsack import TeamOptimizer
 from cartola_autopick.optimizer.captain_bench import SecondaryOptimizer
+from cartola_autopick.storage.db import (
+    save_news_snippets, get_news_since, clear_old_news, get_news_log_stats
+)
 
 console = Console()
 
@@ -16,56 +20,199 @@ def cli():
     """Cartola FC Autopick Team CLI"""
     pass
 
+
+# ─────────────────────────────────────────────────────────────
+# COLLECT COMMAND — meant to be run daily via cron / GitHub Actions
+# ─────────────────────────────────────────────────────────────
 @cli.command()
-@click.option('--strategy', type=click.Choice(['points', 'cartoletas']), default='points', help='Optimization strategy')
-@click.option('--budget', type=float, default=100.0, help='Available team budget in cartoletas (C$)')
-@click.option('--formation', type=str, default='4-3-3', help='Tactical formation (e.g., 4-3-3, 3-4-3, 4-4-2, 3-5-2)')
-def run(strategy, budget, formation):
-    """Run the auto-picker with the specified parameters."""
-    console.print(Panel.fit(f"[bold green]Cartola Autopick Master[/bold green]\nStrategy: [cyan]{strategy}[/cyan] | Budget: [yellow]C${budget:.2f}[/yellow] | Formation: [magenta]{formation}[/magenta]"))
-    
+@click.option('--purge-days', default=14, help='Delete news older than N days (default 14)')
+def collect(purge_days):
+    """Scrape ESPN news for all teams and persist to the local news log DB."""
+    console.print(Panel.fit(
+        "[bold cyan]Cartola Autopick — Daily News Collector[/bold cyan]\n"
+        f"[dim]{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]"
+    ))
+
+    with console.status("[bold blue]Fetching club list from Cartola API...[/bold blue]"):
+        api = CartolaAPIClient()
+        market_data = api.get_market_players()
+        clubs = market_data.get('clubes', {})
+
+    with console.status("[bold blue]Discovering ESPN team IDs...[/bold blue]"):
+        from cartola_autopick.data_ingestion.browser_scraper import discover_espn_ids, scrape_team_news_browser
+        club_names = [c.get('nome', '') for c in clubs.values() if c.get('nome')]
+        espn_ids = discover_espn_ids(club_names)
+        console.print(f"  [green]✓[/green] Found IDs for {len(espn_ids)}/{len(club_names)} teams.")
+
+    console.print("\n[bold yellow]Collecting news for each team...[/bold yellow]")
+    stats_table = Table(show_header=True, header_style="dim")
+    stats_table.add_column("Team")
+    stats_table.add_column("Snippets Found", justify="center")
+    stats_table.add_column("Status", justify="center")
+
+    total_saved = 0
+    for club in clubs.values():
+        team_name = club.get('nome', '')
+        if not team_name:
+            continue
+        snippets = scrape_team_news_browser(team_name, espn_ids)
+        if snippets:
+            save_news_snippets(team_name, snippets)
+            total_saved += len(snippets)
+            status_str = "[green]✓ Saved[/green]"
+        else:
+            status_str = "[dim]No news[/dim]"
+        stats_table.add_row(team_name, str(len(snippets)), status_str)
+
+    console.print(stats_table)
+
+    # Housekeeping: delete old news
+    deleted = clear_old_news(older_than_days=purge_days)
+    console.print(f"\n[dim]Housekeeping: removed {deleted} snippets older than {purge_days} days.[/dim]")
+    console.print(f"[bold green]✓ Collection complete! {total_saved} new snippets saved.[/bold green]\n")
+
+
+# ─────────────────────────────────────────────────────────────
+# RUN COMMAND — reads accumulated news from DB, evaluates & picks team
+# ─────────────────────────────────────────────────────────────
+@cli.command()
+@click.option('--strategy', type=click.Choice(['points', 'cartoletas']), default='points')
+@click.option('--budget', type=float, default=100.0, help='Budget in cartoletas (C$)')
+@click.option('--formation', type=str, default='4-3-3', help='Formation (e.g. 4-3-3, 3-4-3)')
+@click.option('--days', type=int, default=7, help='Days of news history to use for AI analysis')
+def run(strategy, budget, formation, days):
+    """Evaluate accumulated news and pick the optimal team for the round."""
+    console.print(Panel.fit(
+        f"[bold green]Cartola Autopick — Team Evaluator[/bold green]\n"
+        f"Strategy: [cyan]{strategy}[/cyan] | Budget: [yellow]C${budget:.2f}[/yellow] | "
+        f"Formation: [magenta]{formation}[/magenta] | News window: [blue]{days} days[/blue]"
+    ))
+
     with console.status("[bold blue]1. Fetching Market Data from Cartola API...[/bold blue]"):
         api = CartolaAPIClient()
         status_data = api.get_market_status()
-        
         if status_data.get('status_mercado') != 1:
             console.print("[bold red]Warning: The Cartola Market is currently CLOSED![/bold red]")
-            # We continue for testing purposes, but normally we'd warn the user
-            
         market_data = api.get_market_players()
         matches_data = api.get_matches()
-        
         players = market_data.get('atletas', [])
         clubs = market_data.get('clubes', {})
         posicoes = market_data.get('posicoes', {})
         partidas = matches_data.get('partidas', [])
-        
-    with console.status("[bold blue]2. Scraping Recent News for Context Engine...[/bold blue]"):
-        scraper = NewsScraper()
-        news_data = {}
-        # Fetching news for a few clubs as an example to avoid hitting rate limits on test
-        # In a real run, we'd fetch for all 20 clubs.
-        for club_id, club in clubs.items():
-             news_data[club_id] = scraper.get_team_news(club.get('nome', ''))
-             
-    with console.status("[bold blue]3. Generating Player Profiles (Applying Rules, Match Analysis & LLM)...[/bold blue]"):
+
+    # ── Load news from DB ──────────────────────────────────────
+    with console.status(f"[bold blue]2. Loading news from last {days} days...[/bold blue]"):
+        raw_news = get_news_since(days=days)
+        stats = get_news_log_stats()
+
+    # Show DB status
+    if stats['total_snippets'] == 0:
+        console.print(
+            f"[bold yellow]⚠ No news found in the local DB for the last {days} days.[/bold yellow]\n"
+            "  Run [cyan]python main.py collect[/cyan] first to gather news,\n"
+            "  or run [cyan]python main.py run --live[/cyan] to scrape ESPN right now.\n"
+        )
+    else:
+        oldest = datetime.datetime.fromtimestamp(stats['oldest']).strftime('%Y-%m-%d') if stats['oldest'] else 'N/A'
+        newest = datetime.datetime.fromtimestamp(stats['newest']).strftime('%Y-%m-%d') if stats['newest'] else 'N/A'
+        console.print(
+            f"  [green]✓[/green] {stats['total_snippets']} snippets covering "
+            f"{stats['teams_covered']} teams ({oldest} → {newest})"
+        )
+
+    # Map club_id → news snippets
+    news_data = {}
+    for club_id, club in clubs.items():
+        team_name = club.get('nome', '')
+        snippets = raw_news.get(team_name, [])
+        news_data[club_id] = {'news': snippets}
+
+    # ── AI Momentum Analysis ────────────────────────────────────
+    with console.status("[bold blue]3. Analyzing Team Momentum (AI)...[/bold blue]"):
+        from cartola_autopick.context_engine.momentum_llm import MomentumLLM
+        llm = MomentumLLM()
+
+        all_news_dict = {}
+        for club_id, data in news_data.items():
+            club_name = clubs.get(str(club_id), {}).get('nome', '')
+            all_news_dict[club_name] = data['news']
+
+        all_analysis = llm.analyze_all_teams(all_news_dict)
+
+    console.print("\n[bold yellow]AI Team Momentum Summary:[/bold yellow]")
+    momentum_table = Table(show_header=True, header_style="dim")
+    momentum_table.add_column("Team")
+    momentum_table.add_column("Mom.", justify="center")
+    momentum_table.add_column("Risk", justify="center")
+    momentum_table.add_column("Snippets", justify="center")
+    momentum_table.add_column("AI Reasoning")
+
+    for club_id, data in news_data.items():
+        club_name = clubs.get(str(club_id), {}).get('nome', '')
+        analysis = all_analysis.get(club_name, {})
+        if not isinstance(analysis, dict): analysis = {}
+        if 'momentum_score' not in analysis: analysis['momentum_score'] = 1.0
+        if 'risk_score' not in analysis: analysis['risk_score'] = 0.0
+        if 'reasoning' not in analysis: analysis['reasoning'] = "No news available."
+        data['llm'] = analysis
+
+        momentum_table.add_row(
+            club_name,
+            f"{analysis['momentum_score']:.1f}",
+            f"{analysis['risk_score']:.1f}",
+            str(len(data['news'])),
+            analysis['reasoning']
+        )
+
+    console.print(momentum_table)
+
+    # ── Profiler + Optimizer ────────────────────────────────────
+    with console.status("[bold blue]4. Generating Player Profiles...[/bold blue]"):
         profiler = Profiler()
         profiles = profiler.generate_profiles(players, clubs, partidas, news_data)
-        
-    with console.status("[bold blue]4. Running PuLP Optimizer...[/bold blue]"):
+
+    with console.status("[bold blue]5. Running PuLP Optimizer...[/bold blue]"):
         optimizer = TeamOptimizer(budget=budget, strategy=strategy, formation=formation)
         selected_team = optimizer.optimize(profiles)
-        
         sec_opt = SecondaryOptimizer()
         selected_team = sec_opt.select_captain(selected_team)
-        
         spent = sum(p['price'] for p in selected_team)
         remaining = budget - spent
         bench = sec_opt.select_bench(profiles, selected_team, remaining, formation)
-        
-    # Display Output
+
+    # ── Match Analysis Display ──────────────────────────────────
+    from cartola_autopick.context_engine.match_analyzer import MatchAnalyzer
+    analyzer = MatchAnalyzer()
+    console.print("\n[bold yellow]Round Matches & Team Strengths:[/bold yellow]")
+    matches_table = Table(show_header=True, header_style="dim")
+    matches_table.add_column("Home Team")
+    matches_table.add_column("Str", justify="center")
+    matches_table.add_column("vs", justify="center")
+    matches_table.add_column("Away Team")
+    matches_table.add_column("Str", justify="center")
+    matches_table.add_column("Analysis", justify="center")
+
+    for m in partidas:
+        home_id = m.get('clube_casa_id')
+        away_id = m.get('clube_visitante_id')
+        home_name = clubs.get(str(home_id), {}).get('nome', 'Unknown')
+        away_name = clubs.get(str(away_id), {}).get('nome', 'Unknown')
+        analysis = analyzer.analyze_match(m)
+        cls_text = analysis['classification']
+        if cls_text == "home_favorite":
+            cls_styled = f"[green]{home_name}[/green]"
+        elif cls_text == "away_favorite":
+            cls_styled = f"[green]{away_name}[/green]"
+        else:
+            cls_styled = "[yellow]Equilibrium[/yellow]"
+        matches_table.add_row(
+            home_name, str(analysis['home_score']), "X",
+            away_name, str(analysis['away_score']), cls_styled
+        )
+    console.print(matches_table)
+
+    # ── Final Team Display ──────────────────────────────────────
     console.print("\n[bold green]Optimization Complete! Here is your team:[/bold green]")
-    
     table = Table(show_header=True, header_style="bold magenta")
     table.add_column("Pos")
     table.add_column("Player Name")
@@ -73,10 +220,8 @@ def run(strategy, budget, formation):
     table.add_column("Price (C$)", justify="right")
     table.add_column("Exp. Pts", justify="right")
     table.add_column("Captain?", justify="center")
-    
-    # Sort team by position id
+
     selected_team.sort(key=lambda x: x['position_id'])
-    
     total_expected = 0.0
     for p in selected_team:
         pos_name = posicoes.get(str(p['position_id']), {}).get('abreviacao', '')
@@ -84,35 +229,26 @@ def run(strategy, budget, formation):
         is_cap = "[bold yellow]C[/bold yellow]" if p.get('is_captain') else ""
         pts = p['expected_points']
         if p.get('is_captain'):
-            pts *= 2 # Cartola rules: Captain points are doubled
+            pts *= 2
         total_expected += pts
-        
-        table.add_row(
-            pos_name, 
-            p['name'], 
-            club_name, 
-            f"C${p['price']:.2f}", 
-            f"{pts:.2f}",
-            is_cap
-        )
-        
+        table.add_row(pos_name, p['name'], club_name, f"C${p['price']:.2f}", f"{pts:.2f}", is_cap)
+
     console.print(table)
-    
     console.print(f"\n[bold]Total Spent:[/bold] C${spent:.2f} (Remaining: C${remaining:.2f})")
     console.print(f"[bold]Total Expected Points:[/bold] {total_expected:.2f}\n")
-    
+
     if bench:
         console.print("[bold yellow]Substitutes (Bench):[/bold yellow]")
         bench_table = Table(show_header=True, header_style="dim")
         bench_table.add_column("Pos")
         bench_table.add_column("Player Name")
         bench_table.add_column("Price (C$)", justify="right")
-        
         bench.sort(key=lambda x: x['position_id'])
         for b in bench:
             pos_name = posicoes.get(str(b['position_id']), {}).get('abreviacao', '')
             bench_table.add_row(pos_name, b['name'], f"C${b['price']:.2f}")
         console.print(bench_table)
+
 
 if __name__ == '__main__':
     cli()
