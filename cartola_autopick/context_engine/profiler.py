@@ -9,7 +9,6 @@ class Profiler:
         self.match_analyzer = MatchAnalyzer()
         self.rule_engine = RuleEngine()
         self.llm = MomentumLLM()
-        self.strength_scores = self.match_analyzer.compute_strength_scores()
         
     def generate_profiles(self, players, clubs, matches, news_data):
         """
@@ -25,13 +24,11 @@ class Profiler:
         for m in matches:
             home_id = m.get('clube_casa_id')
             away_id = m.get('clube_visitante_id')
-            home_name = clubs.get(str(home_id), {}).get('nome', '') if clubs else ''
-            away_name = clubs.get(str(away_id), {}).get('nome', '') if clubs else ''
             
-            # Analyze match difficulty
-            analysis = self.match_analyzer.analyze_match(home_name, away_name, self.strength_scores)
-            match_map[home_id] = {"opponent": away_name, "multiplier": analysis['home_multiplier']}
-            match_map[away_id] = {"opponent": home_name, "multiplier": analysis['away_multiplier']}
+            # Analyze match difficulty using official table positions and recent form
+            analysis = self.match_analyzer.analyze_match(m)
+            match_map[home_id] = {"multiplier": analysis['home_multiplier']}
+            match_map[away_id] = {"multiplier": analysis['away_multiplier']}
 
         for p in players:
             club_id = p.get('clube_id')
@@ -43,7 +40,8 @@ class Profiler:
             status_mult = self.rule_engine.evaluate_api_status(status_id)
             
             # 2. News/Rule Multiplier
-            club_news = news_data.get(club_id, [])
+            team_ctx = news_data.get(club_id, {})
+            club_news = team_ctx.get('news', [])
             news_mult = self.rule_engine.evaluate_player_news(p.get('apelido', ''), club_news)
             
             # 3. Match Equilibrium Multiplier
@@ -51,15 +49,16 @@ class Profiler:
             match_mult = match_info['multiplier']
             
             # 4. LLM Momentum
-            # Here we just assume LLM gave us a score. For speed, we'd batch this or run it once per club.
-            # We will default to 1.0 in this snippet to avoid blocking on API calls for all players.
-            # In a real run, `news_data` could pre-contain the LLM score per club.
-            llm_score = 1.0 
+            # We fetch the LLM momentum score previously calculated in main.py
+            llm_data = team_ctx.get('llm', {})
+            llm_score = llm_data.get('momentum_score', 1.0)
+            llm_risk = llm_data.get('risk_score', 0.0)
             
             # Final Expected Points Calculation
-            # This is a very basic initial formula.
-            # Expected Points = Base Avg * Status (0/1) * NewsRisk (0.1/1) * MatchDiff (0.8-1.2) * Momentum
-            expected_points = media_num * status_mult * news_mult * match_mult * llm_score
+            # Apply severe penalty if risk is high (e.g. risk > 0.8)
+            risk_multiplier = 1.0 - (llm_risk * 0.5) 
+            
+            expected_points = media_num * status_mult * news_mult * match_mult * llm_score * risk_multiplier
             
             profiles.append({
                 "id": p.get('atleta_id'),

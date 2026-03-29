@@ -1,7 +1,10 @@
 import requests
 import urllib.parse
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+import warnings
 from ..storage.db import get_cached_response, save_cache_response
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 class NewsScraper:
     """Scrapes recent news using Google News RSS to feed the LLM Context Engine."""
