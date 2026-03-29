@@ -1,9 +1,45 @@
 import sqlite3
 import json
 import time
+import datetime
 import os
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'cartola_cache.db')
+
+
+def get_round_window_start() -> int:
+    """
+    Calculates the unix timestamp for the start of the current inter-round news window.
+
+    Logic:
+    - The Cartola API `mercado/status` returns `fechamento.timestamp`, which is
+      when the CURRENT round's market closes.
+    - A Brasileirão round window is ~7 days, so the previous round closed
+      approximately 7 days before the current round closes.
+    - We use: window_start = fechamento.timestamp - 7 days.
+    - Falls back to 7 days ago if the Cartola API is unavailable.
+
+    Returns a unix timestamp (int).
+    """
+    try:
+        import requests
+        res = requests.get(
+            'https://api.cartola.globo.com/mercado/status',
+            headers={'User-Agent': 'Mozilla/5.0'},
+            timeout=5
+        )
+        status = res.json()
+        fechamento = status.get('fechamento', {})
+        # The timestamp here is when the CURRENT round closes
+        close_ts = fechamento.get('timestamp')
+        if close_ts:
+            # Window starts 7 days before current round closes = ~when last round closed
+            return int(close_ts) - (7 * 86400)
+    except Exception:
+        pass
+    # Fallback: 7 days ago from now
+    return int(time.time()) - (7 * 86400)
+
 
 def get_connection():
     """Returns a SQLite connection to the local database."""
@@ -51,14 +87,31 @@ def save_news_snippets(team_name: str, snippets: list[str]):
     conn.close()
 
 
-def get_news_since(days: int = 7) -> dict:
+def get_news_since(days: int = None) -> dict:
     """
-    Returns all collected news snippets from the last N days.
+    Returns all collected news snippets within the current inter-round window.
+
+    By default, the window starts when the PREVIOUS round's market closed
+    (fetched from the Cartola API via get_round_window_start). This ensures
+    only news relevant to the upcoming round is used for AI analysis.
+
+    If `days` is explicitly provided, it is used as a hard cap (whichever
+    cutoff is more recent wins).
+
     Result: { 'Flamengo': ['snippet1', 'snippet2', ...], ... }
     """
+    # Calculate the round-aware start timestamp
+    round_start = get_round_window_start()
+
+    # If caller specified a day cap, use whichever cutoff is more recent
+    if days is not None:
+        days_cutoff = int(time.time()) - (days * 86400)
+        cutoff = max(round_start, days_cutoff)
+    else:
+        cutoff = round_start
+
     conn = get_connection()
     cursor = conn.cursor()
-    cutoff = int(time.time()) - (days * 86400)
     cursor.execute(
         'SELECT team_name, snippet FROM team_news_log WHERE collected_at >= ? ORDER BY collected_at DESC',
         (cutoff,)

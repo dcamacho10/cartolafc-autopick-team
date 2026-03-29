@@ -101,24 +101,28 @@ def run(strategy, budget, formation, days):
         partidas = matches_data.get('partidas', [])
 
     # ── Load news from DB ──────────────────────────────────────
-    with console.status(f"[bold blue]2. Loading news from last {days} days...[/bold blue]"):
-        raw_news = get_news_since(days=days)
+    with console.status(f"[bold blue]2. Loading news from the current round window...[/bold blue]"):
+        from cartola_autopick.storage.db import get_round_window_start
+        window_start_ts = get_round_window_start()
+        window_start_dt = datetime.datetime.fromtimestamp(window_start_ts)
+        raw_news = get_news_since(days=days if days != 7 else None)  # None = auto round-window
         stats = get_news_log_stats()
 
-    # Show DB status
+    # Show DB + window status
     if stats['total_snippets'] == 0:
         console.print(
-            f"[bold yellow]⚠ No news found in the local DB for the last {days} days.[/bold yellow]\n"
-            "  Run [cyan]python main.py collect[/cyan] first to gather news,\n"
-            "  or run [cyan]python main.py run --live[/cyan] to scrape ESPN right now.\n"
+            f"[bold yellow]⚠ No news found in the local DB for the current round window.[/bold yellow]\n"
+            "  Run [cyan]python main.py collect[/cyan] first to gather news.\n"
         )
     else:
         oldest = datetime.datetime.fromtimestamp(stats['oldest']).strftime('%Y-%m-%d') if stats['oldest'] else 'N/A'
         newest = datetime.datetime.fromtimestamp(stats['newest']).strftime('%Y-%m-%d') if stats['newest'] else 'N/A'
         console.print(
-            f"  [green]✓[/green] {stats['total_snippets']} snippets covering "
-            f"{stats['teams_covered']} teams ({oldest} → {newest})"
+            f"  [green]✓[/green] Round window starts: [cyan]{window_start_dt.strftime('%Y-%m-%d %H:%M')}[/cyan]  "
+            f"| {stats['total_snippets']} snippets, {stats['teams_covered']} teams "
+            f"(collected {oldest} → {newest})"
         )
+
 
     # Map club_id → news snippets
     news_data = {}
