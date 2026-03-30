@@ -25,9 +25,9 @@ def cli():
 # COLLECT COMMAND — meant to be run daily via cron / GitHub Actions
 # ─────────────────────────────────────────────────────────────
 @cli.command()
-@click.option('--purge-days', default=14, help='Delete news older than N days (default 14)')
+@click.option('--purge-days', default=7, help='Delete news older than N days (default 7)')
 def collect(purge_days):
-    """Scrape ESPN news for all teams and persist to the local news log DB."""
+    """Scrape ESPN news for all teams and persist to the Supabase Cloud database."""
     console.print(Panel.fit(
         "[bold cyan]Cartola Autopick — Daily News Collector[/bold cyan]\n"
         f"[dim]{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]"
@@ -111,7 +111,7 @@ def run(strategy, budget, formation, days):
     # Show DB + window status
     if stats['total_snippets'] == 0:
         console.print(
-            f"[bold yellow]⚠ No news found in the local DB for the current round window.[/bold yellow]\n"
+            f"[bold yellow]⚠ No news found in the Supabase DB for the current round window.[/bold yellow]\n"
             "  Run [cyan]python main.py collect[/cyan] first to gather news.\n"
         )
     else:

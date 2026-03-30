@@ -8,8 +8,8 @@ The project operates on an advanced **Two-Phase, Cron-Based Architecture**. Inst
 
 ### Phase 1: Daily News Collector
 - **`browser_scraper.py`**: A robust headless browser engine using **Playwright**. It dynamically discovers team IDs directly from ESPN and scrapes deep articles (prioritizing probable lineups and injury reports), extracting the full article body alongside headlines.
-- **SQLite Persistent Log**: News snippets are appended daily into `cartola_cache.db`.
-- **GitHub Actions (`collect_news.yml`)**: Fully automates the daily collection. Every day at 05:00 BRT, a cloud runner scrapes the latest news and commits the updated DB back to the repository.
+- **Supabase Cloud PostgreSQL DB**: News snippets are securely appended daily into a free cloud database, solving data persistence issues.
+- **GitHub Actions (`collect_news.yml`)**: Fully automates the daily collection. Every day at 05:00 BRT, a cloud runner scrapes the latest news and reliably pushes it to the Supabase database.
 
 ### Phase 2: On-Demand Evaluator & Optimizer
 - **Cartola API Client**: Fetches the live valid market, players, match schedule, and statuses directly from the official Cartola API. Detects the exact time the previous round closed.
@@ -28,18 +28,20 @@ The project operates on an advanced **Two-Phase, Cron-Based Architecture**. Inst
    playwright install chromium
    ```
 
-2. **Set up API Keys:**
-   Create a `.env` file in the root directory and add your Groq API key (used for the Llama 3 AI Context Engine):
+2. **Set up API Keys & Database:**
+   Create a free PostgreSQL database project at [Supabase](https://supabase.com/) and grab your Connection string (URI).
+   Create a `.env` file in the root directory and add your credentials:
    ```env
    GROQ_API_KEY=your_api_key_here
+   DATABASE_URL=postgresql://postgres:[YOUR-PASSWORD]@db...
    ```
-   *Get a free key at [console.groq.com](https://console.groq.com).*
+   *Get a free Groq key at [console.groq.com](https://console.groq.com).*
 
 3. **Enable Daily Automated Collection (Optional but Recommended):**
    - Push this repository to your own GitHub account.
    - Go to your repository **Settings → Secrets and variables → Actions**.
-   - Add your `GROQ_API_KEY` as a Repository Secret.
-   - GitHub Actions will now automatically update the news database locally every day!
+   - Add your `GROQ_API_KEY` and `DATABASE_URL` as Repository Secrets.
+   - GitHub Actions will now automatically update the news database globally every day!
 
 ---
 

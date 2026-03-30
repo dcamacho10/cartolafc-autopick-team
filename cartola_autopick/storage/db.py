@@ -1,11 +1,12 @@
-import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 import json
 import time
 import datetime
 import os
+from dotenv import load_dotenv
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'cartola_cache.db')
-
+load_dotenv()
 
 def get_round_window_start() -> int:
     """
@@ -42,14 +43,21 @@ def get_round_window_start() -> int:
 
 
 def get_connection():
-    """Returns a SQLite connection to the local database."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    """Returns a PostgreSQL connection to the cloud database."""
+    db_url = os.environ.get('DATABASE_URL')
+    if not db_url:
+        raise ValueError("DATABASE_URL environment variable is not set. Please set it to connect to Supabase.")
+    conn = psycopg.connect(db_url)
     return conn
 
 def setup_db():
     """Initializes the database schema if it doesn't exist."""
-    conn = get_connection()
+    try:
+        conn = get_connection()
+    except ValueError:
+        # If DATABASE_URL is not set at module import, we skip schema init
+        return
+        
     cursor = conn.cursor()
     # Cache table for API responses
     cursor.execute('''
@@ -62,7 +70,7 @@ def setup_db():
     # Persistent log of daily collected news snippets per team
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS team_news_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             team_name TEXT NOT NULL,
             snippet TEXT NOT NULL,
             collected_at INTEGER NOT NULL
@@ -77,11 +85,21 @@ def save_news_snippets(team_name: str, snippets: list[str]):
     if not snippets:
         return
     conn = get_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(row_factory=dict_row)
     now = int(time.time())
+
+    cursor.execute('SELECT snippet FROM team_news_log WHERE team_name = %s', (team_name,))
+    existing = {row['snippet'] for row in cursor.fetchall()}
+    unique_snippets = [s for s in snippets if s not in existing]
+
+    if not unique_snippets:
+        conn.close()
+        return
+
+    cursor = conn.cursor()
     cursor.executemany(
-        'INSERT INTO team_news_log (team_name, snippet, collected_at) VALUES (?, ?, ?)',
-        [(team_name, s, now) for s in snippets]
+        'INSERT INTO team_news_log (team_name, snippet, collected_at) VALUES (%s, %s, %s)',
+        [(team_name, s, now) for s in unique_snippets]
     )
     conn.commit()
     conn.close()
@@ -111,9 +129,9 @@ def get_news_since(days: int = None) -> dict:
         cutoff = round_start
 
     conn = get_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(row_factory=dict_row)
     cursor.execute(
-        'SELECT team_name, snippet FROM team_news_log WHERE collected_at >= ? ORDER BY collected_at DESC',
+        'SELECT team_name, snippet FROM team_news_log WHERE collected_at >= %s ORDER BY collected_at DESC',
         (cutoff,)
     )
     rows = cursor.fetchall()
@@ -128,12 +146,12 @@ def get_news_since(days: int = None) -> dict:
     return result
 
 
-def clear_old_news(older_than_days: int = 14):
+def clear_old_news(older_than_days: int = 7):
     """Deletes news snippets older than N days to keep the DB lean."""
     conn = get_connection()
     cursor = conn.cursor()
     cutoff = int(time.time()) - (older_than_days * 86400)
-    cursor.execute('DELETE FROM team_news_log WHERE collected_at < ?', (cutoff,))
+    cursor.execute('DELETE FROM team_news_log WHERE collected_at < %s', (cutoff,))
     deleted = cursor.rowcount
     conn.commit()
     conn.close()
@@ -143,7 +161,7 @@ def clear_old_news(older_than_days: int = 14):
 def get_news_log_stats() -> dict:
     """Returns basic stats about the news log for CLI display."""
     conn = get_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(row_factory=dict_row)
     cursor.execute('SELECT COUNT(*) as total, COUNT(DISTINCT team_name) as teams FROM team_news_log')
     row = cursor.fetchone()
     cursor.execute('SELECT MIN(collected_at), MAX(collected_at) FROM team_news_log')
@@ -159,8 +177,8 @@ def get_news_log_stats() -> dict:
 def get_cached_response(endpoint, max_age_seconds=3600):
     """Retrieves a cached API response if it's still valid."""
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT data, timestamp FROM api_cache WHERE endpoint = ?', (endpoint,))
+    cursor = conn.cursor(row_factory=dict_row)
+    cursor.execute('SELECT data, timestamp FROM api_cache WHERE endpoint = %s', (endpoint,))
     row = cursor.fetchone()
     conn.close()
     
@@ -177,8 +195,10 @@ def save_cache_response(endpoint, data):
     timestamp = int(time.time())
     data_str = json.dumps(data)
     cursor.execute('''
-        INSERT OR REPLACE INTO api_cache (endpoint, data, timestamp)
-        VALUES (?, ?, ?)
+        INSERT INTO api_cache (endpoint, data, timestamp)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (endpoint) DO UPDATE 
+        SET data = EXCLUDED.data, timestamp = EXCLUDED.timestamp
     ''', (endpoint, data_str, timestamp))
     conn.commit()
     conn.close()

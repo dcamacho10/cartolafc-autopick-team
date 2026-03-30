@@ -6,7 +6,7 @@ The tool is split into two commands:
 
 | Command | When to run | What it does |
 |---|---|---|
-| `python main.py collect` | Daily (automated) | Scrapes ESPN for all 20 teams and saves snippets to a local SQLite DB |
+| `python main.py collect` | Daily (automated) | Scrapes ESPN for all 20 teams and saves snippets to a Supabase Cloud Database |
 | `python main.py run ...` | Before each round closes | Reads the accumulated news history and picks the optimal team |
 
 Over the week before a round, `collect` builds up a rich context of:
@@ -27,13 +27,13 @@ git commit -m "feat: add cron-based news collection"
 git push
 ```
 
-### 2. Add the `GROQ_API_KEY` secret
-Go to **Repository → Settings → Secrets and variables → Actions → New repository secret**:
-- Name: `GROQ_API_KEY`
-- Value: your Groq API key from [console.groq.com](https://console.groq.com)
+### 2. Add Secrets
+Go to **Repository → Settings → Secrets and variables → Actions → New repository secret** and add:
+- `GROQ_API_KEY`: your Groq API key from [console.groq.com](https://console.groq.com)
+- `DATABASE_URL`: your Supabase PostgreSQL connection string (e.g. `postgresql://...`)
 
 ### 3. Done!
-The workflow in `.github/workflows/collect_news.yml` will run **automatically every day at 08:00 UTC** (05:00 Brasília). It commits the updated `cartola_cache.db` back to your repo.
+The workflow in `.github/workflows/collect_news.yml` will run **automatically every day at 08:00 UTC** (05:00 Brasília). It connects directly to your Supabase cloud database to persist the news.
 
 > **Manual trigger**: Go to Actions → "Daily News Collector" → Run workflow.
 
