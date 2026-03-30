@@ -38,7 +38,11 @@ class MomentumLLM:
         news_text = "TEAM HEADLINES:\n"
         for team, news in all_news_dict.items():
             news_text += f"\n--- {team} ---\n"
-            items = news[:8] if isinstance(news, list) else []
+            # Truncate to strictly avoid Groq 6000 TPM free limits
+            items = []
+            for n in (news[:4] if isinstance(news, list) else []):
+                clean_n = n.replace('\n', ' ').strip()
+                items.append(clean_n[:180] + "..." if len(clean_n) > 180 else clean_n)
             news_text += "\n".join([f"- {n}" for n in items]) if items else "- (sem manchetes coletadas)\n"
 
         prompt = f"""
