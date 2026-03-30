@@ -170,8 +170,8 @@ def get_news_log_stats() -> dict:
     return {
         'total_snippets': row['total'],
         'teams_covered': row['teams'],
-        'oldest': bounds[0],
-        'newest': bounds[1],
+        'oldest': bounds['min'],
+        'newest': bounds['max'],
     }
 
 def get_cached_response(endpoint, max_age_seconds=3600):
