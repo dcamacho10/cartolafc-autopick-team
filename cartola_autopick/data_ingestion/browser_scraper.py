@@ -8,10 +8,13 @@ Also provides dynamic ESPN team ID resolution for any Cartola team.
 import asyncio
 import re
 import requests
+import os
 from playwright.async_api import async_playwright
+from groq import Groq
 
 # Module-level cache so we discover IDs only once per process
 _ESPN_ID_CACHE = {}
+_ARTICLE_SUMMARY_CACHE = {}
 
 
 def normalize(s: str) -> str:
@@ -114,7 +117,7 @@ def discover_espn_ids(club_names: list[str]) -> dict[str, int]:
 
 
 async def _extract_article_body(article_page, url: str) -> str:
-    """Opens an article page and extracts its body text."""
+    """Open article page and extract as much clean body text as possible."""
     try:
         await article_page.goto(url, wait_until="domcontentloaded", timeout=10000)
         await article_page.wait_for_timeout(2000)
@@ -122,10 +125,11 @@ async def _extract_article_body(article_page, url: str) -> str:
             paragraphs = await article_page.query_selector_all(sel)
             if paragraphs:
                 texts = []
-                for p in paragraphs[:6]:
+                for p in paragraphs[:18]:
                     t = await p.inner_text()
-                    if t.strip():
-                        texts.append(t.strip())
+                    clean = " ".join((t or "").split())
+                    if clean and len(clean) > 25:
+                        texts.append(clean)
                 if texts:
                     return " ".join(texts)
     except:
@@ -133,11 +137,62 @@ async def _extract_article_body(article_page, url: str) -> str:
     return ""
 
 
+def _summarize_article_with_ai(title: str, body: str) -> str:
+    """
+    Summarize one article with Groq when key is available.
+    Falls back to a deterministic trimmed body if AI fails/rate-limits.
+    """
+    if not body:
+        return ""
+
+    cache_key = f"{title}::{body[:600]}"
+    if cache_key in _ARTICLE_SUMMARY_CACHE:
+        return _ARTICLE_SUMMARY_CACHE[cache_key]
+
+    fallback = body[:900]
+    if len(body) > 900:
+        fallback += "..."
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        _ARTICLE_SUMMARY_CACHE[cache_key] = fallback
+        return fallback
+
+    try:
+        client = Groq(api_key=api_key)
+        prompt = f"""
+        Resuma a notícia esportiva abaixo em português, priorizando informação útil para previsão de desempenho no próximo jogo.
+        Foque em: escalação provável, desfalques, lesões, suspensão, rotação, contexto do técnico e moral do time.
+        Seja factual e sem opinião.
+        Entregue em 2 a 4 frases curtas (até 500 caracteres no total).
+
+        Título: {title}
+        Texto: {body[:4500]}
+        """
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": "Você resume notícias esportivas com objetividade. Responda apenas com o resumo."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if not text:
+            text = fallback
+        summary = text[:520]
+    except Exception:
+        summary = fallback
+
+    _ARTICLE_SUMMARY_CACHE[cache_key] = summary
+    return summary
+
+
 async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
     """
-    Loads the ESPN Brasil team page and extracts ALL headlines and article
-    body text. Priority articles (lineups, injuries) get full extraction;
-    all other articles also get their body read to maximize context.
+    Loads the ESPN Brasil team page and extracts article links.
+    Then opens each article and stores only rich [Artigo] summaries.
+    Headline-only entries are intentionally discarded.
     """
     url = f"https://www.espn.com.br/futebol/time/_/id/{espn_id}"
     snippets = []
@@ -172,7 +227,6 @@ async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
                     text = (await el.inner_text()).strip()
                     if text and len(text) > 10 and text not in seen_titles:
                         seen_titles.add(text)
-                        snippets.append(text)  # Always save the headline
                         href = await el.evaluate("el => el.closest('a')?.href")
                         if href and href.startswith("http"):
                             headline_links.append((text, href))
@@ -182,7 +236,7 @@ async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
 
             article_page = await context.new_page()
             followed = 0
-            max_articles = 5  # Follow up to 5 articles in total
+            max_articles = 8  # Follow more articles for richer context
 
             # Sort: priority articles first, then the rest
             sorted_links = sorted(
@@ -196,10 +250,8 @@ async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
                     break
                 body = await _extract_article_body(article_page, link)
                 if body:
-                    # Trim body: priority articles get 600 chars, others get 300
-                    is_priority = any(kw in title.lower() for kw in priority_kws)
-                    limit = 600 if is_priority else 300
-                    snippets.append(f"[Artigo: {title}] {body[:limit]}")
+                    summary = _summarize_article_with_ai(title, body)
+                    snippets.append(f"[Artigo: {title}] {summary}")
                     followed += 1
 
             await browser.close()

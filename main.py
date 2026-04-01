@@ -4,6 +4,7 @@ from rich.table import Table
 from rich.panel import Panel
 import time
 import datetime
+import json
 
 from cartola_autopick.data_ingestion.api_client import CartolaAPIClient
 from cartola_autopick.context_engine.profiler import Profiler
@@ -14,6 +15,37 @@ from cartola_autopick.storage.db import (
 )
 
 console = Console()
+
+
+def summarize_team_momentum(analysis):
+    """Build a short human-readable momentum summary from LLM scores."""
+    if not isinstance(analysis, dict):
+        return "Neutral"
+    momentum = float(analysis.get("momentum_score", 1.0) or 1.0)
+    risk = float(analysis.get("risk_score", 0.0) or 0.0)
+
+    if momentum >= 1.2 and risk <= 0.3:
+        return "Hot momentum"
+    if momentum <= 0.8 and risk >= 0.6:
+        return "Negative trend + high risk"
+    if momentum <= 0.8:
+        return "Negative trend"
+    if risk >= 0.6:
+        return "High rotation/injury risk"
+    if momentum >= 1.2:
+        return "Positive trend"
+    if risk >= 0.4:
+        return "Moderate risk"
+    return "Neutral"
+
+
+def build_llm_input_snippets(news_items):
+    """Mirror MomentumLLM input trimming for transparent debugging."""
+    items = []
+    for n in (news_items[:6] if isinstance(news_items, list) else []):
+        clean_n = str(n).replace('\n', ' ').strip()
+        items.append(clean_n[:320] + "..." if len(clean_n) > 320 else clean_n)
+    return items
 
 @click.group()
 def cli():
@@ -47,7 +79,7 @@ def collect(purge_days):
     console.print("\n[bold yellow]Collecting news for each team...[/bold yellow]")
     stats_table = Table(show_header=True, header_style="dim")
     stats_table.add_column("Team")
-    stats_table.add_column("Snippets Found", justify="center")
+    stats_table.add_column("Articles Found", justify="center")
     stats_table.add_column("Status", justify="center")
 
     total_saved = 0
@@ -80,7 +112,8 @@ def collect(purge_days):
 @click.option('--budget', type=float, default=100.0, help='Budget in cartoletas (C$)')
 @click.option('--formation', type=str, default='4-3-3', help='Formation (e.g. 4-3-3, 3-4-3)')
 @click.option('--days', type=int, default=7, help='Days of news history to use for AI analysis')
-def run(strategy, budget, formation, days):
+@click.option('--debug-ai', is_flag=True, help='Print deep per-team debug for AI news assembly and outputs')
+def run(strategy, budget, formation, days, debug_ai):
     """Evaluate accumulated news and pick the optimal team for the round."""
     console.print(Panel.fit(
         f"[bold green]Cartola Autopick — Team Evaluator[/bold green]\n"
@@ -119,7 +152,7 @@ def run(strategy, budget, formation, days):
         newest = datetime.datetime.fromtimestamp(stats['newest']).strftime('%Y-%m-%d') if stats['newest'] else 'N/A'
         console.print(
             f"  [green]✓[/green] Round window starts: [cyan]{window_start_dt.strftime('%Y-%m-%d %H:%M')}[/cyan]  "
-            f"| {stats['total_snippets']} snippets, {stats['teams_covered']} teams "
+            f"| {stats['total_snippets']} articles, {stats['teams_covered']} teams "
             f"(collected {oldest} → {newest})"
         )
 
@@ -143,12 +176,44 @@ def run(strategy, budget, formation, days):
 
         all_analysis = llm.analyze_all_teams(all_news_dict)
 
+    if debug_ai:
+        console.print("\n[bold cyan]AI Debug - Per Team Input/Output Audit:[/bold cyan]")
+        for club_id, data in news_data.items():
+            club_name = clubs.get(str(club_id), {}).get('nome', '')
+            raw_snippets = data.get('news', [])
+            llm_input_snippets = build_llm_input_snippets(raw_snippets)
+            analysis = all_analysis.get(club_name, {})
+            if not isinstance(analysis, dict):
+                analysis = {}
+            analysis_view = {
+                "momentum_score": analysis.get("momentum_score", 1.0),
+                "risk_score": analysis.get("risk_score", 0.0),
+                "summary": summarize_team_momentum(analysis),
+                "reasoning": analysis.get("reasoning", "No news available."),
+            }
+            debug_payload = {
+                "team": club_name,
+                "club_id": club_id,
+                "raw_news_count_db": len(raw_snippets),
+                "llm_input_count": len(llm_input_snippets),
+                "llm_input_snippets": llm_input_snippets,
+                "llm_output": analysis_view,
+            }
+            console.print(
+                Panel(
+                    json.dumps(debug_payload, ensure_ascii=False, indent=2),
+                    title=f"Debug - {club_name}",
+                    border_style="cyan",
+                )
+            )
+
     console.print("\n[bold yellow]AI Team Momentum Summary:[/bold yellow]")
     momentum_table = Table(show_header=True, header_style="dim")
     momentum_table.add_column("Team")
     momentum_table.add_column("Mom.", justify="center")
     momentum_table.add_column("Risk", justify="center")
-    momentum_table.add_column("Snippets", justify="center")
+    momentum_table.add_column("Articles", justify="center")
+    momentum_table.add_column("Summary")
     momentum_table.add_column("AI Reasoning")
 
     for club_id, data in news_data.items():
@@ -165,6 +230,7 @@ def run(strategy, budget, formation, days):
             f"{analysis['momentum_score']:.1f}",
             f"{analysis['risk_score']:.1f}",
             str(len(data['news'])),
+            summarize_team_momentum(analysis),
             analysis['reasoning']
         )
 
@@ -194,6 +260,8 @@ def run(strategy, budget, formation, days):
     matches_table.add_column("vs", justify="center")
     matches_table.add_column("Away Team")
     matches_table.add_column("Str", justify="center")
+    matches_table.add_column("Home Momentum")
+    matches_table.add_column("Away Momentum")
     matches_table.add_column("Analysis", justify="center")
 
     for m in partidas:
@@ -201,6 +269,8 @@ def run(strategy, budget, formation, days):
         away_id = m.get('clube_visitante_id')
         home_name = clubs.get(str(home_id), {}).get('nome', 'Unknown')
         away_name = clubs.get(str(away_id), {}).get('nome', 'Unknown')
+        home_momentum = summarize_team_momentum(all_analysis.get(home_name, {}))
+        away_momentum = summarize_team_momentum(all_analysis.get(away_name, {}))
         analysis = analyzer.analyze_match(m)
         cls_text = analysis['classification']
         if cls_text == "home_favorite":
@@ -211,7 +281,8 @@ def run(strategy, budget, formation, days):
             cls_styled = "[yellow]Equilibrium[/yellow]"
         matches_table.add_row(
             home_name, str(analysis['home_score']), "X",
-            away_name, str(analysis['away_score']), cls_styled
+            away_name, str(analysis['away_score']),
+            home_momentum, away_momentum, cls_styled
         )
     console.print(matches_table)
 
