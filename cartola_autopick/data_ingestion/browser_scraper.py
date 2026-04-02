@@ -188,6 +188,15 @@ def _summarize_article_with_ai(title: str, body: str) -> str:
     return summary
 
 
+def _is_priority_news_text(text: str) -> bool:
+    low = str(text or "").lower()
+    priority_kws = (
+        "provável", "escalação", "escala", "desfalque", "poupar", "poupado",
+        "lesão", "lesionado", "suspens", "retorna", "retorno", "dúvida", "duvida"
+    )
+    return any(kw in low for kw in priority_kws)
+
+
 async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
     """
     Loads the ESPN Brasil team page and extracts article links.
@@ -251,7 +260,9 @@ async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
                 body = await _extract_article_body(article_page, link)
                 if body:
                     summary = _summarize_article_with_ai(title, body)
-                    snippets.append(f"[Artigo: {title}] {summary}")
+                    is_priority = _is_priority_news_text(title) or _is_priority_news_text(summary)
+                    label = "Artigo Prioritario" if is_priority else "Artigo"
+                    snippets.append(f"[{label}: {title}] {summary}")
                     followed += 1
 
             await browser.close()

@@ -16,6 +16,16 @@ from cartola_autopick.storage.db import (
 
 console = Console()
 
+TEAM_SIGNAL_KEYWORDS = {
+    "desfalque": ("desfalque", "fora"),
+    "lesao": ("lesão", "lesionado"),
+    "suspensao": ("suspens", "cartão", "cartao"),
+    "poupar": ("poupar", "poupado", "reserva"),
+    "duvida": ("dúvida", "duvida"),
+    "escalacao": ("escalação", "escalacao", "provável", "provavel"),
+    "retorno": ("retorno", "retorna", "relacionado", "titular"),
+}
+
 
 def summarize_team_momentum(analysis):
     """Build a short human-readable momentum summary from LLM scores."""
@@ -39,6 +49,49 @@ def summarize_team_momentum(analysis):
     return "Neutral"
 
 
+def _count_team_signals(news_items):
+    text = " ".join(str(n).lower() for n in (news_items or []))
+    counts = {}
+    for name, keywords in TEAM_SIGNAL_KEYWORDS.items():
+        counts[name] = sum(text.count(kw) for kw in keywords)
+    priority_articles = sum(1 for n in (news_items or []) if "[artigo prioritario:" in str(n).lower())
+    return counts, priority_articles
+
+
+def _build_team_diagnostic(team_name, news_items, llm_analysis, match_ctx):
+    signal_counts, priority_articles = _count_team_signals(news_items)
+    momentum = float(llm_analysis.get("momentum_score", 1.0) or 1.0)
+    risk = float(llm_analysis.get("risk_score", 0.0) or 0.0)
+    summary = summarize_team_momentum(llm_analysis)
+    reasoning = str(llm_analysis.get("reasoning", "No AI reasoning.")).strip()
+    if len(reasoning) > 120:
+        reasoning = reasoning[:117] + "..."
+
+    risk_hits = (
+        signal_counts["desfalque"]
+        + signal_counts["lesao"]
+        + signal_counts["suspensao"]
+        + signal_counts["poupar"]
+        + signal_counts["duvida"]
+    )
+    positive_hits = signal_counts["escalacao"] + signal_counts["retorno"]
+
+    if match_ctx:
+        match_part = (
+            f"Jogo {match_ctx['venue']} vs {match_ctx['opponent']} "
+            f"({match_ctx['edge_label']}, força {match_ctx['team_strength']:.1f}x{match_ctx['opp_strength']:.1f})"
+        )
+    else:
+        match_part = "Sem jogo mapeado na rodada"
+
+    news_part = (
+        f"Notícias: {len(news_items)} artigos ({priority_articles} prioritários), "
+        f"sinais risco={risk_hits}, sinais positivos={positive_hits}"
+    )
+    ai_part = f"IA: momentum={momentum:.2f}, risk={risk:.2f}, leitura={summary}"
+    return f"{match_part}. {news_part}. {ai_part}. Motivo: {reasoning}"
+
+
 def build_llm_input_snippets(news_items):
     """Mirror MomentumLLM input trimming for transparent debugging."""
     items = []
@@ -57,7 +110,7 @@ def cli():
 # COLLECT COMMAND — meant to be run daily via cron / GitHub Actions
 # ─────────────────────────────────────────────────────────────
 @cli.command()
-@click.option('--purge-days', default=7, help='Delete news older than N days (default 7)')
+@click.option('--purge-days', default=4, help='Delete news older than N days (default 4)')
 def collect(purge_days):
     """Scrape ESPN news for all teams and persist to the Supabase Cloud database."""
     console.print(Panel.fit(
@@ -111,7 +164,7 @@ def collect(purge_days):
 @click.option('--strategy', type=click.Choice(['points', 'cartoletas']), default='points')
 @click.option('--budget', type=float, default=100.0, help='Budget in cartoletas (C$)')
 @click.option('--formation', type=str, default='4-3-3', help='Formation (e.g. 4-3-3, 3-4-3)')
-@click.option('--days', type=int, default=7, help='Days of news history to use for AI analysis')
+@click.option('--days', type=int, default=3, help='Days of news history to use for AI analysis')
 @click.option('--debug-ai', is_flag=True, help='Print deep per-team debug for AI news assembly and outputs')
 def run(strategy, budget, formation, days, debug_ai):
     """Evaluate accumulated news and pick the optimal team for the round."""
@@ -133,18 +186,47 @@ def run(strategy, budget, formation, days, debug_ai):
         posicoes = market_data.get('posicoes', {})
         partidas = matches_data.get('partidas', [])
 
+    from cartola_autopick.context_engine.match_analyzer import MatchAnalyzer
+    analyzer = MatchAnalyzer()
+    match_context_by_club = {}
+    for m in partidas:
+        analysis = analyzer.analyze_match(m)
+        home_id = m.get('clube_casa_id')
+        away_id = m.get('clube_visitante_id')
+        home_name = clubs.get(str(home_id), {}).get('nome', 'Unknown')
+        away_name = clubs.get(str(away_id), {}).get('nome', 'Unknown')
+
+        match_context_by_club[home_id] = {
+            "venue": "casa",
+            "opponent": away_name,
+            "team_strength": analysis["home_score"],
+            "opp_strength": analysis["away_score"],
+            "edge_label": "favorito" if analysis["classification"] == "home_favorite" else (
+                "equilibrado" if analysis["classification"] == "equilibrium" else "azarão"
+            ),
+        }
+        match_context_by_club[away_id] = {
+            "venue": "fora",
+            "opponent": home_name,
+            "team_strength": analysis["away_score"],
+            "opp_strength": analysis["home_score"],
+            "edge_label": "favorito" if analysis["classification"] == "away_favorite" else (
+                "equilibrado" if analysis["classification"] == "equilibrium" else "azarão"
+            ),
+        }
+
     # ── Load news from DB ──────────────────────────────────────
-    with console.status(f"[bold blue]2. Loading news from the current round window...[/bold blue]"):
+    with console.status(f"[bold blue]2. Loading news from analysis window...[/bold blue]"):
         from cartola_autopick.storage.db import get_round_window_start
         window_start_ts = get_round_window_start()
         window_start_dt = datetime.datetime.fromtimestamp(window_start_ts)
-        raw_news = get_news_since(days=days if days != 7 else None)  # None = auto round-window
+        raw_news = get_news_since(days=days)
         stats = get_news_log_stats()
 
     # Show DB + window status
     if stats['total_snippets'] == 0:
         console.print(
-            f"[bold yellow]⚠ No news found in the Supabase DB for the current round window.[/bold yellow]\n"
+            f"[bold yellow]⚠ No news found in the Supabase DB for the selected analysis window.[/bold yellow]\n"
             "  Run [cyan]python main.py collect[/cyan] first to gather news.\n"
         )
     else:
@@ -152,6 +234,7 @@ def run(strategy, budget, formation, days, debug_ai):
         newest = datetime.datetime.fromtimestamp(stats['newest']).strftime('%Y-%m-%d') if stats['newest'] else 'N/A'
         console.print(
             f"  [green]✓[/green] Round window starts: [cyan]{window_start_dt.strftime('%Y-%m-%d %H:%M')}[/cyan]  "
+            f"| analyzing last [cyan]{days} days[/cyan] "
             f"| {stats['total_snippets']} articles, {stats['teams_covered']} teams "
             f"(collected {oldest} → {newest})"
         )
@@ -214,7 +297,7 @@ def run(strategy, budget, formation, days, debug_ai):
     momentum_table.add_column("Risk", justify="center")
     momentum_table.add_column("Articles", justify="center")
     momentum_table.add_column("Summary")
-    momentum_table.add_column("AI Reasoning")
+    momentum_table.add_column("Team Diagnostic")
 
     for club_id, data in news_data.items():
         club_name = clubs.get(str(club_id), {}).get('nome', '')
@@ -224,6 +307,12 @@ def run(strategy, budget, formation, days, debug_ai):
         if 'risk_score' not in analysis: analysis['risk_score'] = 0.0
         if 'reasoning' not in analysis: analysis['reasoning'] = "No news available."
         data['llm'] = analysis
+        team_diag = _build_team_diagnostic(
+            club_name,
+            data.get('news', []),
+            analysis,
+            match_context_by_club.get(club_id),
+        )
 
         momentum_table.add_row(
             club_name,
@@ -231,7 +320,7 @@ def run(strategy, budget, formation, days, debug_ai):
             f"{analysis['risk_score']:.1f}",
             str(len(data['news'])),
             summarize_team_momentum(analysis),
-            analysis['reasoning']
+            team_diag
         )
 
     console.print(momentum_table)
@@ -251,8 +340,6 @@ def run(strategy, budget, formation, days, debug_ai):
         bench = sec_opt.select_bench(profiles, selected_team, remaining, formation)
 
     # ── Match Analysis Display ──────────────────────────────────
-    from cartola_autopick.context_engine.match_analyzer import MatchAnalyzer
-    analyzer = MatchAnalyzer()
     console.print("\n[bold yellow]Round Matches & Team Strengths:[/bold yellow]")
     matches_table = Table(show_header=True, header_style="dim")
     matches_table.add_column("Home Team")

@@ -9,6 +9,65 @@ class Profiler:
         self.match_analyzer = MatchAnalyzer()
         self.rule_engine = RuleEngine()
         self.llm = MomentumLLM()
+
+    @staticmethod
+    def _clamp(value, low, high):
+        return max(low, min(high, value))
+
+    @staticmethod
+    def _keyword_score(text: str, keywords: tuple[str, ...]) -> int:
+        low = str(text or "").lower()
+        return sum(1 for kw in keywords if kw in low)
+
+    def _priority_news_multiplier(self, club_news):
+        """
+        Team-level adjustment from priority news.
+        Negative tactical signals reduce the entire team's projection;
+        positive return/lineup signals can recover part of the penalty.
+        """
+        if not club_news:
+            return 1.0
+
+        text = " ".join(str(n) for n in club_news)
+        negative_kws = ("desfalque", "poup", "lesão", "suspens", "fora", "duvida", "dúvida", "reserva")
+        positive_kws = ("retorna", "retorno", "relacionado", "titular")
+        has_priority_tag = "[artigo prioritario:" in text.lower()
+
+        neg = self._keyword_score(text, negative_kws)
+        pos = self._keyword_score(text, positive_kws)
+        raw = 1.0 - (0.025 * neg) + (0.015 * pos)
+
+        # Force stronger impact when high-priority tactical news exists.
+        if has_priority_tag and neg > 0:
+            raw -= 0.05
+
+        return self._clamp(raw, 0.80, 1.08)
+
+    def _player_momentum_multiplier(self, player):
+        """
+        Lightweight per-player momentum proxy from available market fields.
+        Uses valuation delta + season average for stable, bounded impact.
+        """
+        variacao = float(player.get('variacao_num', 0.0) or 0.0)
+        media = float(player.get('media_num', 0.0) or 0.0)
+
+        var_mult = 1.0
+        if variacao >= 1.5:
+            var_mult = 1.08
+        elif variacao >= 0.5:
+            var_mult = 1.04
+        elif variacao <= -1.5:
+            var_mult = 0.92
+        elif variacao <= -0.5:
+            var_mult = 0.96
+
+        avg_mult = 1.0
+        if media >= 7.0:
+            avg_mult = 1.05
+        elif media <= 3.5:
+            avg_mult = 0.95
+
+        return self._clamp(var_mult * avg_mult, 0.90, 1.12)
         
     def generate_profiles(self, players, clubs, matches, news_data):
         """
@@ -39,7 +98,7 @@ class Profiler:
             # 1. Base API Status Multiplier
             status_mult = self.rule_engine.evaluate_api_status(status_id)
             
-            # 2. News/Rule Multiplier
+            # 2. News/Rule Multiplier (player-level mention penalty)
             team_ctx = news_data.get(club_id, {})
             club_news = team_ctx.get('news', [])
             news_mult = self.rule_engine.evaluate_player_news(p.get('apelido', ''), club_news)
@@ -48,17 +107,33 @@ class Profiler:
             match_info = match_map.get(club_id, {"multiplier": 1.0})
             match_mult = match_info['multiplier']
             
-            # 4. LLM Momentum
+            # 4. LLM Momentum (team-level)
             # We fetch the LLM momentum score previously calculated in main.py
             llm_data = team_ctx.get('llm', {})
             llm_score = llm_data.get('momentum_score', 1.0)
             llm_risk = llm_data.get('risk_score', 0.0)
-            
-            # Final Expected Points Calculation
-            # Apply severe penalty if risk is high (e.g. risk > 0.8)
-            risk_multiplier = 1.0 - (llm_risk * 0.5) 
-            
-            expected_points = media_num * status_mult * news_mult * match_mult * llm_score * risk_multiplier
+
+            # 5. Priority tactical news impact for the full team.
+            priority_news_mult = self._priority_news_multiplier(club_news)
+
+            # 6. Player-level momentum proxy.
+            player_momentum_mult = self._player_momentum_multiplier(p)
+
+            # Final Expected Points Calculation.
+            # Keep all multipliers bounded to avoid unstable extremes.
+            llm_momentum_mult = self._clamp(float(llm_score or 1.0), 0.75, 1.35)
+            risk_multiplier = self._clamp(1.0 - (float(llm_risk or 0.0) * 0.65), 0.35, 1.0)
+
+            expected_points = (
+                media_num
+                * status_mult
+                * news_mult
+                * match_mult
+                * llm_momentum_mult
+                * risk_multiplier
+                * priority_news_mult
+                * player_momentum_mult
+            )
             
             profiles.append({
                 "id": p.get('atleta_id'),

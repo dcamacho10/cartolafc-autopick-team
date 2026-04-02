@@ -40,6 +40,11 @@ class MomentumLLM:
         "ceará": "CHA",
         "remo": "REM",
     }
+    PRIORITY_KEYWORDS = (
+        "desfalque", "desfalques", "escala", "escalação", "provável", "poupar", "poupado",
+        "lesão", "lesionado", "suspens", "dúvida", "duvida", "retorno", "retorna", "fora"
+    )
+    DEFAULT_BATCH_SIZE = 5
 
     def __init__(self):
         pass
@@ -109,6 +114,74 @@ class MomentumLLM:
             }
         return out
 
+    @staticmethod
+    def _is_priority_news(text: str) -> bool:
+        low = str(text or "").lower()
+        return any(kw in low for kw in MomentumLLM.PRIORITY_KEYWORDS)
+
+    @staticmethod
+    def _build_news_text(all_news_dict, max_priority=3, max_general=1, max_chars=260):
+        news_text = "TEAM NEWS ARTICLES (SUMMARIZED):\n"
+        for team, news in all_news_dict.items():
+            news_text += f"\n--- {team} ---\n"
+            raw_items = news if isinstance(news, list) else []
+            cleaned = []
+            for n in raw_items:
+                clean_n = str(n).replace('\n', ' ').strip()
+                if clean_n:
+                    cleaned.append(clean_n[:max_chars] + "..." if len(clean_n) > max_chars else clean_n)
+            priority_items = [n for n in cleaned if MomentumLLM._is_priority_news(n)]
+            general_items = [n for n in cleaned if n not in priority_items]
+            selected_priority = priority_items[:max_priority]
+            selected_general = general_items[:max_general]
+
+            if selected_priority:
+                news_text += "PRIORITY NEWS (peso alto):\n"
+                news_text += "\n".join([f"- {n}" for n in selected_priority]) + "\n"
+            if selected_general:
+                news_text += "GENERAL NEWS:\n"
+                news_text += "\n".join([f"- {n}" for n in selected_general]) + "\n"
+            if not selected_priority and not selected_general:
+                news_text += "- (sem artigos coletados)\n"
+        return news_text
+
+    def _query_batch(self, client, batch_news_dict, compact=False):
+        if compact:
+            news_text = self._build_news_text(batch_news_dict, max_priority=2, max_general=0, max_chars=170)
+        else:
+            news_text = self._build_news_text(batch_news_dict, max_priority=3, max_general=1, max_chars=260)
+
+        prompt = f"""
+        Você analisa notícias recentes do Brasileirão para o Cartola FC. Os nomes das chaves JSON DEVEM ser
+        EXATAMENTE os nomes de times listados abaixo (nome completo do clube), sem trocar por siglas.
+
+        Para CADA time, avalie impacto no próximo jogo considerando o conteúdo dos artigos.
+        REGRA IMPORTANTE DE PESO:
+        - notícias marcadas como "PRIORITY NEWS (peso alto)" têm MAIS peso que notícias gerais.
+        - quando PRIORITY NEWS indicar desfalques/rotação/poupados, aumente risk_score com firmeza.
+        - quando PRIORITY NEWS indicar retorno de titulares/escalação forte, reduza risk_score.
+        - não compense notícias críticas com notícias genéricas de bastidores.
+
+        {news_text}
+
+        Responda com UM único objeto JSON. Cada chave = nome de time exatamente como acima.
+        Valor por time (objeto) com estas chaves:
+        - "momentum_score": float de 0.5 a 1.5 (1.0 neutro).
+        - "risk_score": float 0.0 a 1.0.
+        - "reasoning": frase curta em português (máx 140 caracteres).
+
+        Saída: APENAS JSON válido, sem markdown e sem texto fora do JSON.
+        """
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are a data assistant. Output ONLY valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            model="llama-3.1-8b-instant",
+            temperature=0.0,
+        )
+        return response.choices[0].message.content
+
     def analyze_all_teams(self, all_news_dict):
         """
         Receives a dict: { 'Team A': ['news 1', 'news 2', ...], 'Team B': [...] }
@@ -119,64 +192,33 @@ class MomentumLLM:
         if not API_KEY or not all_news_dict:
             return {}
             
-        news_text = "TEAM NEWS ARTICLES (SUMMARIZED):\n"
-        for team, news in all_news_dict.items():
-            news_text += f"\n--- {team} ---\n"
-            # Keep richer context while staying within free-tier limits.
-            items = []
-            for n in (news[:6] if isinstance(news, list) else []):
-                clean_n = n.replace('\n', ' ').strip()
-                items.append(clean_n[:420] + "..." if len(clean_n) > 420 else clean_n)
-            news_text += "\n".join([f"- {n}" for n in items]) if items else "- (sem artigos coletados)\n"
-
-        prompt = f"""
-        Você analisa notícias recentes do Brasileirão para o Cartola FC. Os nomes das chaves JSON DEVEM ser
-        EXATAMENTE os nomes de times listados abaixo (nome completo do clube), sem trocar por siglas.
-
-        Para CADA time, avalie impacto no próximo jogo considerando o conteúdo dos artigos:
-        - desfalques, lesões, dúvidas, suspensões, jogadores poupados;
-        - crise de resultados, pressão no técnico, mudança de comando;
-        - prioridade de elenco para Libertadores, Copa do Brasil ou outro torneio (rotação, reservas).
-
-        {news_text}
-
-        Responda com UM único objeto JSON. Cada chave = nome de time exatamente como acima.
-        Valor por time (objeto) com estas chaves:
-        - "momentum_score": float de 0.5 (crise / sequência ruim) a 1.5 (ótimo momento); 1.0 se neutro ou sem informação.
-        - "risk_score": float 0.0 (time provável forte) a 1.0 (muito desfalcado, rotação forte, foco em outra competição).
-        - "reasoning": uma frase curta em português.
-
-        Saída: APENAS JSON válido, sem markdown e sem texto fora do JSON.
-        """
-        
+        team_names = list(all_news_dict.keys())
+        batched_results = {}
         try:
             import re
             client = Groq(api_key=API_KEY)
-            response = client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You are a data assistant. You MUST output ONLY valid JSON without any conversational text before or after."},
-                    {"role": "user", "content": prompt}
-                ],
-                model="llama-3.1-8b-instant",
-                temperature=0.0,
-            )
-            
-            text = response.choices[0].message.content
-            text = text.replace("```json", "").replace("```", "").strip()
-            
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                text = match.group(0)
+            for i in range(0, len(team_names), self.DEFAULT_BATCH_SIZE):
+                batch_teams = team_names[i:i + self.DEFAULT_BATCH_SIZE]
+                batch_news = {t: all_news_dict.get(t, []) for t in batch_teams}
+                try:
+                    text = self._query_batch(client, batch_news, compact=False)
+                except Exception as batch_err:
+                    if "413" in str(batch_err) or "Request too large" in str(batch_err) or "rate_limit_exceeded" in str(batch_err):
+                        text = self._query_batch(client, batch_news, compact=True)
+                    else:
+                        raise
 
-            parsed = json.loads(text)
-            expected = list(all_news_dict.keys())
-            aligned = self._align_keys(parsed, expected)
-            if aligned:
-                return aligned
+                text = (text or "").replace("```json", "").replace("```", "").strip()
+                match = re.search(r'\{.*\}', text, re.DOTALL)
+                if match:
+                    text = match.group(0)
+                parsed = json.loads(text)
+                aligned = self._align_keys(parsed, batch_teams)
+                if not aligned:
+                    aligned = self._extract_from_noticias_list(parsed, batch_teams)
+                batched_results.update(aligned or {})
 
-            # Fallback for non-conforming LLM outputs that still contain per-team headlines.
-            extracted = self._extract_from_noticias_list(parsed, expected)
-            return extracted
+            return batched_results
             
         except Exception as e:
             error_str = str(e)

@@ -1,4 +1,8 @@
 class MatchAnalyzer:
+    @staticmethod
+    def _clamp(value, low, high):
+        return max(low, min(high, value))
+
     """Uses the official Cartola API match data (table positions) to compute Team Strength (1-5)
     and evaluate match equilibrium. Includes mandante/visitante last-five form (v/e/d) from the API."""
 
@@ -56,22 +60,20 @@ class MatchAnalyzer:
         away_score = round(away_base + away_form_mod, 1)
 
         diff = home_score - away_score
-        
-        # Adjust for generic home advantage factor (Home fans, travel, etc)
+
+        # Generic home advantage plus contextual strength differential.
         adjusted_diff = diff + 0.5
+
+        # Build continuous multipliers so matchup quality has stronger effect on final projection.
+        home_multiplier = self._clamp(1.0 + (adjusted_diff * 0.09), 0.75, 1.25)
+        away_multiplier = self._clamp(1.0 - (adjusted_diff * 0.09), 0.75, 1.25)
 
         if abs(adjusted_diff) <= 1.0:
             classification = "equilibrium"
-            home_multiplier = 1.0
-            away_multiplier = 1.0
         elif adjusted_diff > 1.0:
             classification = "home_favorite"
-            home_multiplier = 1.2
-            away_multiplier = 0.8
         else:
             classification = "away_favorite"
-            home_multiplier = 0.8
-            away_multiplier = 1.2
 
         home_form = match_dict.get("aproveitamento_mandante") or []
         away_form = match_dict.get("aproveitamento_visitante") or []
@@ -84,4 +86,6 @@ class MatchAnalyzer:
             "away_multiplier": away_multiplier,
             "home_form_last5": self.format_form_sequence(home_form),
             "away_form_last5": self.format_form_sequence(away_form),
+            "strength_diff": round(diff, 2),
+            "adjusted_diff": round(adjusted_diff, 2),
         }
