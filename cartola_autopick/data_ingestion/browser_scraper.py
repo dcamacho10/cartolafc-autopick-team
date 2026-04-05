@@ -192,7 +192,8 @@ def _is_priority_news_text(text: str) -> bool:
     low = str(text or "").lower()
     priority_kws = (
         "provável", "escalação", "escala", "desfalque", "poupar", "poupado",
-        "lesão", "lesionado", "suspens", "retorna", "retorno", "dúvida", "duvida"
+        "lesão", "lesionado", "suspens", "retorna", "retorno", "dúvida", "duvida",
+        "técnico", "tecnico", "treinador", "demissão", "demissao", "demite", "interino", "comando",
     )
     return any(kw in low for kw in priority_kws)
 
@@ -241,7 +242,10 @@ async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
                             headline_links.append((text, href))
 
             # Keywords for high-priority deep extraction
-            priority_kws = ["provável", "escalação", "desfalque", "poupado", "lesão", "suspens", "volta", "retorna"]
+            priority_kws = [
+                "provável", "escalação", "desfalque", "poupado", "lesão", "suspens", "volta", "retorna",
+                "técnico", "tecnico", "treinador", "demissão", "demissao", "demite", "interino", "comando",
+            ]
 
             article_page = await context.new_page()
             followed = 0

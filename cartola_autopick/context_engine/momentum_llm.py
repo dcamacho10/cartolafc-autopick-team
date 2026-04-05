@@ -42,7 +42,10 @@ class MomentumLLM:
     }
     PRIORITY_KEYWORDS = (
         "desfalque", "desfalques", "escala", "escalação", "provável", "poupar", "poupado",
-        "lesão", "lesionado", "suspens", "dúvida", "duvida", "retorno", "retorna", "fora"
+        "lesão", "lesionado", "suspens", "dúvida", "duvida", "retorno", "retorna", "fora",
+        # Troca de comando — impacto alto no Cartola (incerteza + possível mudança de esquema).
+        "técnico", "tecnico", "treinador", "demissão", "demissao", "demite", "demitido",
+        "interino", "comando", "contratado", "anunciado como técnico", "novo técnico",
     )
     DEFAULT_BATCH_SIZE = 5
 
@@ -158,6 +161,9 @@ class MomentumLLM:
         Para CADA time, avalie impacto no próximo jogo considerando o conteúdo dos artigos.
         REGRA IMPORTANTE DE PESO:
         - notícias marcadas como "PRIORITY NEWS (peso alto)" têm MAIS peso que notícias gerais.
+        - TROCA DE TÉCNICO / DEMISSÃO / INTERINO / NOVO COMANDO: trate como sinal de MÁXIMO IMPACTO.
+          Aumente fortemente risk_score (incerteza de escalação e minutagem) e ajuste momentum_score
+          conforme o contexto (efeito "novo técnico" pode subir moral de curto prazo, mas o risco operacional continua alto).
         - quando PRIORITY NEWS indicar desfalques/rotação/poupados, aumente risk_score com firmeza.
         - quando PRIORITY NEWS indicar retorno de titulares/escalação forte, reduza risk_score.
         - não compense notícias críticas com notícias genéricas de bastidores.

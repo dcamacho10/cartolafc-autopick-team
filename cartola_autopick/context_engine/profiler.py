@@ -19,11 +19,25 @@ class Profiler:
         low = str(text or "").lower()
         return sum(1 for kw in keywords if kw in low)
 
+    MANAGER_CHANGE_KEYWORDS = (
+        "demissão", "demissao", "demite", "demitido", "demitidos", "dispensa o técnico",
+        "dispensa o tecnico", "troca de técnico", "troca de tecnico", "troca no comando",
+        "mudança no comando", "mudanca no comando", "novo técnico", "novo tecnico",
+        "novo treinador", "assume interinamente", "interino", "comandante interino",
+        "contratado como técnico", "contratado como tecnico", "anunciou o técnico",
+    )
+
+    @classmethod
+    def _has_manager_change_signal(cls, text: str) -> bool:
+        low = str(text or "").lower()
+        return any(kw in low for kw in cls.MANAGER_CHANGE_KEYWORDS)
+
     def _priority_news_multiplier(self, club_news):
         """
         Team-level adjustment from priority news.
         Negative tactical signals reduce the entire team's projection;
         positive return/lineup signals can recover part of the penalty.
+        Troca de técnico: impacto forte (incerteza de escalação e minutagem).
         """
         if not club_news:
             return 1.0
@@ -41,7 +55,11 @@ class Profiler:
         if has_priority_tag and neg > 0:
             raw -= 0.05
 
-        return self._clamp(raw, 0.80, 1.08)
+        # Mudança de técnico: peso alto — reduz expectativa base por incerteza (Cartola penaliza erro de escalação).
+        if self._has_manager_change_signal(text):
+            raw -= 0.10
+
+        return self._clamp(raw, 0.72, 1.08)
 
     def _player_momentum_multiplier(self, player):
         """
@@ -123,6 +141,9 @@ class Profiler:
             # Keep all multipliers bounded to avoid unstable extremes.
             llm_momentum_mult = self._clamp(float(llm_score or 1.0), 0.75, 1.35)
             risk_multiplier = self._clamp(1.0 - (float(llm_risk or 0.0) * 0.65), 0.35, 1.0)
+            # Reforço quando as notícias citam troca de técnico (além do que o LLM já ponderou).
+            if self._has_manager_change_signal(" ".join(str(n) for n in club_news)):
+                risk_multiplier = self._clamp(risk_multiplier * 0.92, 0.30, 1.0)
 
             expected_points = (
                 media_num

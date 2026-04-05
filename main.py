@@ -24,6 +24,10 @@ TEAM_SIGNAL_KEYWORDS = {
     "duvida": ("dúvida", "duvida"),
     "escalacao": ("escalação", "escalacao", "provável", "provavel"),
     "retorno": ("retorno", "retorna", "relacionado", "titular"),
+    "mudanca_tecnico": (
+        "demissão", "demissao", "demite", "demitido", "técnico", "tecnico", "treinador",
+        "interino", "comando", "novo técnico", "novo tecnico", "troca de técnico", "troca de tecnico",
+    ),
 }
 
 
@@ -36,6 +40,13 @@ def summarize_team_momentum(analysis):
 
     if momentum >= 1.2 and risk <= 0.3:
         return "Hot momentum"
+    # Troca de técnico costuma elevar risk no modelo; destacar na leitura curta.
+    reasoning_low = str(analysis.get("reasoning", "")).lower()
+    if risk >= 0.55 and any(
+        w in reasoning_low
+        for w in ("técnico", "tecnico", "treinador", "demiss", "interino", "comando")
+    ):
+        return "High risk (coach / bench uncertainty)"
     if momentum <= 0.8 and risk >= 0.6:
         return "Negative trend + high risk"
     if momentum <= 0.8:
@@ -75,6 +86,7 @@ def _build_team_diagnostic(team_name, news_items, llm_analysis, match_ctx):
         + signal_counts["duvida"]
     )
     positive_hits = signal_counts["escalacao"] + signal_counts["retorno"]
+    coach_hits = signal_counts.get("mudanca_tecnico", 0)
 
     if match_ctx:
         match_part = (
@@ -87,6 +99,7 @@ def _build_team_diagnostic(team_name, news_items, llm_analysis, match_ctx):
     news_part = (
         f"Notícias: {len(news_items)} artigos ({priority_articles} prioritários), "
         f"sinais risco={risk_hits}, sinais positivos={positive_hits}"
+        + (f", troca de comando≈{coach_hits}" if coach_hits else "")
     )
     ai_part = f"IA: momentum={momentum:.2f}, risk={risk:.2f}, leitura={summary}"
     return f"{match_part}. {news_part}. {ai_part}. Motivo: {reasoning}"
