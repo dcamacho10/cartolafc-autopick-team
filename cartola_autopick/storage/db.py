@@ -205,3 +205,22 @@ def save_cache_response(endpoint, data):
 
 # Setup on import
 setup_db()
+
+def get_expert_consensus(round_number: int) -> dict:
+    """Retrieves the expert analysis JSON from the database for the given round."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(row_factory=dict_row)
+        cursor.execute(
+            'SELECT consensus_data FROM expert_analysis_log WHERE round_number = %s',
+            (round_number,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row and row.get('consensus_data'):
+            return json.loads(row['consensus_data'])
+    except Exception as e:
+        pass
+    return {}
+

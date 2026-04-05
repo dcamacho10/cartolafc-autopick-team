@@ -1,0 +1,19 @@
+{
+  "name": "expert-analysis-module",
+  "version": "1.0.0",
+  "description": "Módulo Expert Analysis do CartolaFC",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test tests/**/*.js"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
+    "dotenv": "^16.4.5",
+    "groq-sdk": "^1.1.2",
+    "node-schedule": "^2.1.1",
+    "pg": "^8.20.0",
+    "zod": "^3.23.8"
+  }
+}

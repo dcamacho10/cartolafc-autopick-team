@@ -15,6 +15,33 @@ class Profiler:
         return max(low, min(high, value))
 
     @staticmethod
+    def _normalize_name(name: str) -> str:
+        if not name: return ""
+        import unicodedata
+        nfkd_form = unicodedata.normalize('NFKD', name)
+        return u"".join([c for c in nfkd_form if not unicodedata.combining(c)]).upper().strip()
+
+    def _expert_consensus_multiplier(self, player_name: str, expert_data: dict) -> float:
+        if not expert_data or 'analysis' not in expert_data:
+            return 1.0
+        players_list = expert_data.get('analysis', {}).get('players', [])
+        norm_name = self._normalize_name(player_name)
+        
+        for ep in players_list:
+            ep_norm = self._normalize_name(ep.get('player_name', ''))
+            if not ep_norm: continue
+            if norm_name == ep_norm or (len(ep_norm) > 4 and ep_norm in norm_name) or (len(norm_name) > 4 and norm_name in ep_norm):
+                tags = ep.get('tags', [])
+                score = ep.get('expert_score', 0)
+                if "seguro" in tags:
+                    return 1.15
+                elif score > 0:
+                    return 1.05
+                elif score < 0:
+                    return 0.85
+        return 1.0
+
+    @staticmethod
     def _keyword_score(text: str, keywords: tuple[str, ...]) -> int:
         low = str(text or "").lower()
         return sum(1 for kw in keywords if kw in low)
@@ -87,7 +114,7 @@ class Profiler:
 
         return self._clamp(var_mult * avg_mult, 0.90, 1.12)
         
-    def generate_profiles(self, players, clubs, matches, news_data):
+    def generate_profiles(self, players, clubs, matches, news_data, expert_data=None):
         """
         Takes Cartola API players, matches and news data, returning enriched profiles.
         players: list of player dicts
@@ -137,6 +164,9 @@ class Profiler:
             # 6. Player-level momentum proxy.
             player_momentum_mult = self._player_momentum_multiplier(p)
 
+            # 7. Expert Consensus Analysis
+            expert_mult = self._expert_consensus_multiplier(p.get('apelido', ''), expert_data)
+
             # Final Expected Points Calculation.
             # Keep all multipliers bounded to avoid unstable extremes.
             llm_momentum_mult = self._clamp(float(llm_score or 1.0), 0.75, 1.35)
@@ -154,6 +184,7 @@ class Profiler:
                 * risk_multiplier
                 * priority_news_mult
                 * player_momentum_mult
+                * expert_mult
             )
             
             profiles.append({
@@ -164,7 +195,8 @@ class Profiler:
                 "price": preco_num,
                 "expected_points": expected_points,
                 "status_id": status_id,
-                "media_num": media_num
+                "media_num": media_num,
+                "expert_mult": expert_mult
             })
             
         return profiles

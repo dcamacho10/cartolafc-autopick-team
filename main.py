@@ -11,7 +11,7 @@ from cartola_autopick.context_engine.profiler import Profiler
 from cartola_autopick.optimizer.knapsack import TeamOptimizer
 from cartola_autopick.optimizer.captain_bench import SecondaryOptimizer
 from cartola_autopick.storage.db import (
-    save_news_snippets, get_news_since, clear_old_news, get_news_log_stats
+    save_news_snippets, get_news_since, clear_old_news, get_news_log_stats, get_expert_consensus
 )
 
 console = Console()
@@ -192,6 +192,7 @@ def run(strategy, budget, formation, days, debug_ai):
         status_data = api.get_market_status()
         if status_data.get('status_mercado') != 1:
             console.print("[bold red]Warning: The Cartola Market is currently CLOSED![/bold red]")
+        rodada_atual = status_data.get('rodada_atual', 1)
         market_data = api.get_market_players()
         matches_data = api.get_matches()
         players = market_data.get('atletas', [])
@@ -259,6 +260,13 @@ def run(strategy, budget, formation, days, debug_ai):
         team_name = club.get('nome', '')
         snippets = raw_news.get(team_name, [])
         news_data[club_id] = {'news': snippets}
+        
+    expert_data = get_expert_consensus(rodada_atual)
+    if expert_data:
+        num_players_expert = len(expert_data.get("analysis", {}).get("players", []))
+        console.print(f"  [green]✓[/green] Loaded Expert Consensus for Round {rodada_atual} ({num_players_expert} players mapped)")
+    else:
+        console.print(f"  [dim]⚠ No Expert Consensus found for Round {rodada_atual} in Supabase.[/dim]")
 
     # ── AI Momentum Analysis ────────────────────────────────────
     with console.status("[bold blue]3. Analyzing Team Momentum (AI)...[/bold blue]"):
@@ -341,7 +349,7 @@ def run(strategy, budget, formation, days, debug_ai):
     # ── Profiler + Optimizer ────────────────────────────────────
     with console.status("[bold blue]4. Generating Player Profiles...[/bold blue]"):
         profiler = Profiler()
-        profiles = profiler.generate_profiles(players, clubs, partidas, news_data)
+        profiles = profiler.generate_profiles(players, clubs, partidas, news_data, expert_data)
 
     with console.status("[bold blue]5. Running PuLP Optimizer...[/bold blue]"):
         optimizer = TeamOptimizer(budget=budget, strategy=strategy, formation=formation)
@@ -394,6 +402,7 @@ def run(strategy, budget, formation, days, debug_ai):
     table.add_column("Club")
     table.add_column("Price (C$)", justify="right")
     table.add_column("Exp. Pts", justify="right")
+    table.add_column("Exp. Mult", justify="right")
     table.add_column("Captain?", justify="center")
 
     selected_team.sort(key=lambda x: x['position_id'])
@@ -406,7 +415,7 @@ def run(strategy, budget, formation, days, debug_ai):
         if p.get('is_captain'):
             pts *= 2
         total_expected += pts
-        table.add_row(pos_name, p['name'], club_name, f"C${p['price']:.2f}", f"{pts:.2f}", is_cap)
+        table.add_row(pos_name, p['name'], club_name, f"C${p['price']:.2f}", f"{pts:.2f}", f"{p.get('expert_mult', 1.0):.2f}x", is_cap)
 
     console.print(table)
     console.print(f"\n[bold]Total Spent:[/bold] C${spent:.2f} (Remaining: C${remaining:.2f})")
