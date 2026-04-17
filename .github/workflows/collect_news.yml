@@ -1,14 +1,14 @@
-name: Daily News Collector
+name: Pre-close Auto Pipeline
 
 on:
-  # Runs every day at 08:00 UTC (05:00 Brasilia time / BRT)
+  # Runs every hour; command itself only executes in the 1h pre-close window.
   schedule:
-    - cron: '0 8 * * *'
+    - cron: '0 * * * *'
   # Also allows manual trigger from the GitHub Actions UI
   workflow_dispatch:
 
 jobs:
-  collect-news:
+  preclose-pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -28,9 +28,15 @@ jobs:
       - name: Install Playwright Chromium browser
         run: python -m playwright install chromium --with-deps
 
-      - name: Run news collector
+      - name: Run pre-close collect + analysis + email
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python main.py collect
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python main.py auto-preclose --strategy points --budget 140.00 --formation 4-3-3 --days 3 --window-minutes 60
 

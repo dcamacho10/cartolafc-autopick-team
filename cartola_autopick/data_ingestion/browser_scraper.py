@@ -153,13 +153,16 @@ def _summarize_article_with_ai(title: str, body: str) -> str:
     if len(body) > 900:
         fallback += "..."
 
+    # Keep collection fast/reliable by default.
+    # Enable per-article AI summary only when explicitly requested.
+    use_ai_summary = str(os.getenv("ENABLE_ARTICLE_AI_SUMMARY", "false")).lower() in {"1", "true", "yes", "on"}
     api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
+    if not use_ai_summary or not api_key:
         _ARTICLE_SUMMARY_CACHE[cache_key] = fallback
         return fallback
 
     try:
-        client = Groq(api_key=api_key)
+        client = Groq(api_key=api_key, timeout=12.0)
         prompt = f"""
         Resuma a notícia esportiva abaixo em português, priorizando informação útil para previsão de desempenho no próximo jogo.
         Foque em: escalação provável, desfalques, lesões, suspensão, rotação, contexto do técnico e moral do time.
@@ -198,7 +201,7 @@ def _is_priority_news_text(text: str) -> bool:
     return any(kw in low for kw in priority_kws)
 
 
-async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
+async def _scrape_espn_team(espn_id: int, timeout: int = 15000) -> list[str]:
     """
     Loads the ESPN Brasil team page and extracts article links.
     Then opens each article and stores only rich [Artigo] summaries.
@@ -216,10 +219,10 @@ async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
                 locale="pt-BR"
             )
             page = await context.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=max(timeout, 25000))
-            await page.wait_for_timeout(3000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=max(timeout, 15000))
+            await page.wait_for_timeout(1200)
             await page.evaluate("window.scrollBy(0, 1200)")
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(800)
 
             # Collect all headlines and their links
             headline_links = []
@@ -249,7 +252,7 @@ async def _scrape_espn_team(espn_id: int, timeout: int = 25000) -> list[str]:
 
             article_page = await context.new_page()
             followed = 0
-            max_articles = 8  # Follow more articles for richer context
+            max_articles = 4  # Keep collection time bounded near market close
 
             # Sort: priority articles first, then the rest
             sorted_links = sorted(

@@ -5,6 +5,13 @@ from rich.panel import Panel
 import time
 import datetime
 import json
+import os
+import subprocess
+import sys
+import smtplib
+from email.message import EmailMessage
+from typing import Optional
+from dotenv import load_dotenv
 
 from cartola_autopick.data_ingestion.api_client import CartolaAPIClient
 from cartola_autopick.context_engine.profiler import Profiler
@@ -14,7 +21,14 @@ from cartola_autopick.storage.db import (
     save_news_snippets, get_news_since, clear_old_news, get_news_log_stats, get_expert_consensus
 )
 
+# Ensure Windows terminals can render Unicode output used by rich tables/messages.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 console = Console()
+load_dotenv()
 
 TEAM_SIGNAL_KEYWORDS = {
     "desfalque": ("desfalque", "fora"),
@@ -113,6 +127,101 @@ def build_llm_input_snippets(news_items):
         items.append(clean_n[:320] + "..." if len(clean_n) > 320 else clean_n)
     return items
 
+
+def _parse_market_close_datetime(status_data: dict) -> Optional[datetime.datetime]:
+    """Return market close datetime parsed from Cartola market status payload."""
+    fechamento = status_data.get("fechamento")
+    if isinstance(fechamento, dict):
+        if {"ano", "mes", "dia", "hora", "minuto"}.issubset(fechamento.keys()):
+            return datetime.datetime(
+                int(fechamento["ano"]),
+                int(fechamento["mes"]),
+                int(fechamento["dia"]),
+                int(fechamento["hora"]),
+                int(fechamento["minuto"]),
+            )
+        for key in ("timestamp", "unix", "epoch"):
+            if key in fechamento:
+                try:
+                    return datetime.datetime.fromtimestamp(int(fechamento[key]))
+                except (TypeError, ValueError):
+                    pass
+
+    if isinstance(fechamento, str):
+        try:
+            return datetime.datetime.fromisoformat(fechamento.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+        except ValueError:
+            pass
+
+    # Fallback for legacy payloads where fechamento keys are top-level.
+    keys = ("ano", "mes", "dia", "hora", "minuto")
+    if all(k in status_data for k in keys):
+        return datetime.datetime(
+            int(status_data["ano"]),
+            int(status_data["mes"]),
+            int(status_data["dia"]),
+            int(status_data["hora"]),
+            int(status_data["minuto"]),
+        )
+    return None
+
+
+def _send_email_report(subject: str, body: str) -> None:
+    """Send report email using SMTP variables from environment."""
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    email_from = os.getenv("EMAIL_FROM", smtp_user or "")
+    email_to = os.getenv("EMAIL_TO")
+
+    missing = [
+        name for name, value in {
+            "SMTP_HOST": smtp_host,
+            "SMTP_USER": smtp_user,
+            "SMTP_PASSWORD": smtp_password,
+            "EMAIL_TO": email_to,
+        }.items() if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Missing required email environment variables: "
+            + ", ".join(missing)
+        )
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = email_from
+    msg["To"] = email_to
+    msg.set_content(body)
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
+            smtp.starttls()
+            smtp.login(smtp_user, smtp_password)
+            smtp.send_message(msg)
+    except smtplib.SMTPAuthenticationError as exc:
+        raise click.ClickException(
+            "SMTP authentication failed. For Brevo, use SMTP_USER as your Brevo login "
+            "email and SMTP_PASSWORD as an SMTP key from Brevo SMTP settings."
+        ) from exc
+
+
+def _run_command(command_args):
+    """Run subprocess command and return combined output."""
+    completed = subprocess.run(
+        command_args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    output = "\n".join(
+        chunk for chunk in [completed.stdout, completed.stderr] if chunk
+    ).strip()
+    return completed.returncode, output
+
 @click.group()
 def cli():
     """Cartola FC Autopick Team CLI"""
@@ -124,7 +233,8 @@ def cli():
 # ─────────────────────────────────────────────────────────────
 @cli.command()
 @click.option('--purge-days', default=4, help='Delete news older than N days (default 4)')
-def collect(purge_days):
+@click.option('--max-teams', type=int, default=0, help='Limit number of teams to collect (0 = all)')
+def collect(purge_days, max_teams):
     """Scrape ESPN news for all teams and persist to the Supabase Cloud database."""
     console.print(Panel.fit(
         "[bold cyan]Cartola Autopick — Daily News Collector[/bold cyan]\n"
@@ -149,7 +259,11 @@ def collect(purge_days):
     stats_table.add_column("Status", justify="center")
 
     total_saved = 0
-    for club in clubs.values():
+    selected_clubs = list(clubs.values())
+    if max_teams and max_teams > 0:
+        selected_clubs = selected_clubs[:max_teams]
+
+    for club in selected_clubs:
         team_name = club.get('nome', '')
         if not team_name:
             continue
@@ -432,6 +546,78 @@ def run(strategy, budget, formation, days, debug_ai):
             pos_name = posicoes.get(str(b['position_id']), {}).get('abreviacao', '')
             bench_table.add_row(pos_name, b['name'], f"C${b['price']:.2f}")
         console.print(bench_table)
+
+
+@cli.command(name="auto-preclose")
+@click.option('--strategy', type=click.Choice(['points', 'cartoletas']), default='points')
+@click.option('--budget', type=float, default=100.0, help='Budget in cartoletas (C$)')
+@click.option('--formation', type=str, default='4-3-3', help='Formation (e.g. 4-3-3, 3-4-3)')
+@click.option('--days', type=int, default=3, help='Days of news history to use for AI analysis')
+@click.option('--window-minutes', type=int, default=60, help='Run pipeline when close is within N minutes (default 60)')
+@click.option('--max-teams', type=int, default=0, help='Limit collection teams for smoke tests (0 = all)')
+@click.option('--force', is_flag=True, help='Force execution even when outside the pre-close window')
+def auto_preclose(strategy, budget, formation, days, window_minutes, max_teams, force):
+    """
+    Run collect + analysis in the 1h pre-close window and send result by email.
+    """
+    now = datetime.datetime.now()
+    api = CartolaAPIClient(use_cache=False)
+    status_data = api.get_market_status()
+    close_dt = _parse_market_close_datetime(status_data)
+
+    if close_dt is None:
+        raise click.ClickException("Unable to parse market close time from Cartola API payload.")
+
+    delta_minutes = (close_dt - now).total_seconds() / 60.0
+    console.print(
+        f"[cyan]Market close:[/cyan] {close_dt.strftime('%Y-%m-%d %H:%M')} "
+        f"| [cyan]Now:[/cyan] {now.strftime('%Y-%m-%d %H:%M')} "
+        f"| [cyan]Minutes to close:[/cyan] {delta_minutes:.1f}"
+    )
+
+    if not force and not (0 <= delta_minutes <= window_minutes):
+        console.print(
+            f"[yellow]Outside pre-close window (0-{window_minutes} min). Skipping collection/analysis.[/yellow]"
+        )
+        return
+
+    console.print("[bold blue]Pre-close window active. Running collect...[/bold blue]")
+    collect_cmd = [sys.executable, "main.py", "collect"]
+    if max_teams and max_teams > 0:
+        collect_cmd.extend(["--max-teams", str(max_teams)])
+    collect_code, collect_output = _run_command(collect_cmd)
+    if collect_code != 0:
+        raise click.ClickException(
+            "Collect step failed.\n\n" + (collect_output or "No output from collect step.")
+        )
+
+    console.print("[bold blue]Running analysis after collection...[/bold blue]")
+    run_code, run_output = _run_command([
+        sys.executable, "main.py", "run",
+        "--strategy", strategy,
+        "--budget", str(budget),
+        "--formation", formation,
+        "--days", str(days),
+    ])
+    if run_code != 0:
+        raise click.ClickException(
+            "Run step failed.\n\n" + (run_output or "No output from analysis step.")
+        )
+
+    subject = f"Cartola Autopick report - {now.strftime('%Y-%m-%d %H:%M')}"
+    body = (
+        "Cartola Autopick automated pre-close run completed.\n\n"
+        f"Market close: {close_dt.strftime('%Y-%m-%d %H:%M')}\n"
+        f"Triggered at: {now.strftime('%Y-%m-%d %H:%M')}\n"
+        f"Strategy: {strategy} | Budget: {budget} | Formation: {formation} | Days: {days}\n\n"
+        "=== collect output ===\n"
+        f"{collect_output}\n\n"
+        "=== analysis output ===\n"
+        f"{run_output}\n"
+    )
+
+    _send_email_report(subject=subject, body=body)
+    console.print("[bold green]Email report sent successfully.[/bold green]")
 
 
 if __name__ == '__main__':

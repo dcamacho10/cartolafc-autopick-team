@@ -4,14 +4,14 @@ An advanced, fully automated team picker for Cartola FC. This project uses deep 
 
 ## 🌟 Core Architecture & Features
 
-The project operates on an advanced **Two-Phase, Cron-Based Architecture**. Instead of scraping news right before picking the team, the system accumulates deep context over the entire week between rounds.
+The project now focuses on a **Pre-Close Automated Pipeline**. Instead of collecting all week, it gathers the freshest news in the last hour before market close, runs analysis immediately after, and emails the result.
 
-### Phase 1: Daily News Collector
+### Phase 1: Pre-Close Collector
 - **`browser_scraper.py`**: A robust headless browser engine using **Playwright**. It dynamically discovers team IDs directly from ESPN and scrapes deep articles (prioritizing probable lineups and injury reports), extracting the full article body alongside headlines.
-- **Supabase Cloud PostgreSQL DB**: News snippets are securely appended daily into a free cloud database, solving data persistence issues.
-- **GitHub Actions (`collect_news.yml`)**: Fully automates the daily collection. Every day at 05:00 BRT, a cloud runner scrapes the latest news and reliably pushes it to the Supabase database.
+- **Supabase Cloud PostgreSQL DB**: News snippets are persisted in the cloud database.
+- **GitHub Actions (`collect_news.yml`)**: Runs every hour, but only executes the pipeline when market close is within 60 minutes.
 
-### Phase 2: On-Demand Evaluator & Optimizer
+### Phase 2: Immediate Evaluator & Optimizer
 - **Cartola API Client**: Fetches the live valid market, players, match schedule, and statuses directly from the official Cartola API. Detects the exact time the previous round closed.
 - **`momentum_llm.py` (Groq / Llama 3.1)**: Connects to the lightning-fast Groq API. It takes all the accumulated news from the DB for the current round window and analyzes all 20 teams in a single batch, outputting "Momentum" and "Risk" multipliers.
 - **`match_analyzer.py`**: Computes an "Equilibrium Factor", adjusting player expectations based on game difficulty (e.g., boosting defenders in matches where their team is the clear favorite).
@@ -37,11 +37,19 @@ The project operates on an advanced **Two-Phase, Cron-Based Architecture**. Inst
    ```
    *Get a free Groq key at [console.groq.com](https://console.groq.com).*
 
-3. **Enable Daily Automated Collection (Optional but Recommended):**
+3. **Enable Automated Pre-Close Pipeline (Optional but Recommended):**
    - Push this repository to your own GitHub account.
    - Go to your repository **Settings → Secrets and variables → Actions**.
-   - Add your `GROQ_API_KEY` and `DATABASE_URL` as Repository Secrets.
-   - GitHub Actions will now automatically update the news database globally every day!
+   - Add these Repository Secrets:
+     - `GROQ_API_KEY`
+     - `DATABASE_URL`
+     - `SMTP_HOST`
+     - `SMTP_PORT`
+     - `SMTP_USER`
+     - `SMTP_PASSWORD`
+     - `EMAIL_FROM`
+     - `EMAIL_TO`
+   - GitHub Actions will check every hour and run automatically only in the 1-hour pre-close window.
 
 ---
 
@@ -49,16 +57,20 @@ The project operates on an advanced **Two-Phase, Cron-Based Architecture**. Inst
 
 The CLI uses `rich` to print beautiful, organized tables of your Selected Team, Bench, Budget Usage, and AI reasoning.
 
-### Command 1: Collect News Manually (If not using GitHub Actions)
-If you prefer not to use GitHub Actions, you can manually run the collector every day, or schedule it via Windows Task Scheduler or cron.
+### Command 1: Collect News Manually
 ```bash
 python main.py collect
 ```
 
 ### Command 2: Evaluate and Pick Team
-Run this a few hours before the Cartola market closes. The AI will automatically load all the news collected throughout the week (from the exact moment the previous round closed) and pick the optimal squad.
 ```bash
 python main.py run --strategy points --budget 120.50 --formation 4-3-3
+```
+
+### Command 3: Automatic Pre-Close Flow + Email
+Runs only when the market is within the last 60 minutes before closing (unless `--force` is used), executes `collect`, then `run`, and sends results via email.
+```bash
+python main.py auto-preclose --strategy points --budget 120.50 --formation 4-3-3 --days 3 --window-minutes 60
 ```
 
 **Options:**
