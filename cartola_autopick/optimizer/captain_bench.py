@@ -49,7 +49,7 @@ class SecondaryOptimizer:
             min_starter_price = min([p['price'] for p in starters_pos])
             
             # Find candidate bench players
-            candidates = [p for p in available if p['position_id'] == pos_id and p['price'] < min_starter_price and p['price'] <= current_budget]
+            candidates = [p for p in available if p['position_id'] == pos_id and p['price'] <= min_starter_price and p['price'] <= current_budget]
             
             if candidates:
                 # Pick the highest expected points among valid candidates
@@ -57,4 +57,9 @@ class SecondaryOptimizer:
                 bench.append(best_sub)
                 current_budget -= best_sub['price']
                 
+        if bench:
+            luxo = max(bench, key=lambda x: x['expected_points'])
+            for b in bench:
+                b['is_reserva_de_luxo'] = (b['id'] == luxo['id'])
+
         return bench

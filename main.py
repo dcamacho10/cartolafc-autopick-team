@@ -527,7 +527,7 @@ def run(strategy, budget, formation, days, debug_ai):
         is_cap = "[bold yellow]C[/bold yellow]" if p.get('is_captain') else ""
         pts = p['expected_points']
         if p.get('is_captain'):
-            pts *= 2
+            pts *= 1.5
         total_expected += pts
         table.add_row(pos_name, p['name'], club_name, f"C${p['price']:.2f}", f"{pts:.2f}", f"{p.get('expert_mult', 1.0):.2f}x", is_cap)
 
@@ -541,10 +541,12 @@ def run(strategy, budget, formation, days, debug_ai):
         bench_table.add_column("Pos")
         bench_table.add_column("Player Name")
         bench_table.add_column("Price (C$)", justify="right")
+        bench_table.add_column("Luxo?", justify="center")
         bench.sort(key=lambda x: x['position_id'])
         for b in bench:
             pos_name = posicoes.get(str(b['position_id']), {}).get('abreviacao', '')
-            bench_table.add_row(pos_name, b['name'], f"C${b['price']:.2f}")
+            is_luxo = "[bold magenta]RL[/bold magenta]" if b.get('is_reserva_de_luxo') else ""
+            bench_table.add_row(pos_name, b['name'], f"C${b['price']:.2f}", is_luxo)
         console.print(bench_table)
 
 

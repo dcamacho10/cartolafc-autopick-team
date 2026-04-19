@@ -1,9 +1,7 @@
 import * as cheerio from 'cheerio';
 
 const SOURCES = [
-  { name: "ge_dicas", url: "https://ge.globo.com/cartola/dicas/" },
-  // Exemplo de outras fontes a serem raspadas no futuro
-  // { name: "capitao_cartoleiro", url: "https://capitao_cartoleiro.exemplo.com" }
+  { name: "ge_dicas_feed", url: "https://ge.globo.com/cartola/dicas/" },
 ];
 
 export async function fetchHtml(url) {
@@ -22,7 +20,7 @@ export function extractTextFromHtml(html) {
   const $ = cheerio.load(html);
   
   // Remover scripts, styles, e navs para limpar o texto
-  $('script, style, nav, footer, header, aside').remove();
+  $('script, style, nav, footer, header, aside, .hui-premium').remove();
   
   // Tentar buscar o artigo principal primeiro
   let content = $('article').text() || $('main').text() || $('body').text();
@@ -38,25 +36,55 @@ export function normalizeText(text) {
 
 /**
  * Retorna as análises brutas coletadas a partir das fontes configuradas.
- * Como o GE Dicas é dinâmico, isso no futuro deve ser adaptado via Puppeteer
- * se o fetch simples não retornar a estrutura, mas isso serve de base.
+ * Acessa o feed principal de dicas e busca os links para as notícias específicas da rodada.
  */
 export async function scrapeExpertAnalyses() {
   const analyses = [];
   
   for (const source of SOURCES) {
-    console.log(`[Scraper] Buscando dados de ${source.name}...`);
-    const html = await fetchHtml(source.url);
-    const text = extractTextFromHtml(html);
+    console.log(`[Scraper] Buscando feed principal em ${source.name}...`);
+    const feedHtml = await fetchHtml(source.url);
+    if (!feedHtml) continue;
     
-    if (text.length > 200) {
-      analyses.push({
-        sourceName: source.name,
-        rawText: text
-      });
-      console.log(`[Scraper] Sucesso: ${text.length} caracteres extraídos de ${source.name}.`);
-    } else {
-      console.warn(`[Scraper] Aviso: Pouco ou nenhum texto extraído de ${source.name}. A estrutura da página pode exigir renderização JS.`);
+    const $ = cheerio.load(feedHtml);
+    const articleLinks = [];
+    
+    // Captura links de notícias de dicas (ex: dicas da cami, dicas pouco visadas, etc)
+    $('a').each((i, el) => {
+      const href = $(el).attr('href');
+      if (href && href.includes('/cartola/') && href.includes('.ghtml')) {
+        // Ignorar artigos que são apenas vídeo (sem texto útil)
+        if (href.includes('dicas-da-cami') || href.includes('caioba-cartola')) {
+          return; // Pular este link
+        }
+        
+        // Remove âncoras se houver
+        const cleanHref = href.split('#')[0];
+        if (!articleLinks.includes(cleanHref)) {
+          articleLinks.push(cleanHref);
+        }
+      }
+    });
+    
+    console.log(`[Scraper] Encontrados ${articleLinks.length} links potenciais no feed.`);
+    
+    // Limitar a extrair no máximo os top 5 guias/dicas para não exceder limites
+    const topLinks = articleLinks.slice(0, 5);
+    
+    for (const [index, link] of topLinks.entries()) {
+      console.log(`[Scraper] [${index + 1}/${topLinks.length}] Buscando artigo: ${link}`);
+      const articleHtml = await fetchHtml(link);
+      const text = extractTextFromHtml(articleHtml);
+      
+      if (text.length > 200) {
+        analyses.push({
+          sourceName: `ge_dicas_artigo_${index + 1}`,
+          rawText: text
+        });
+        console.log(`[Scraper] Sucesso: ${text.length} caracteres extraídos de ${link}.`);
+      } else {
+        console.warn(`[Scraper] Aviso: Pouco conteúdo extraído de ${link}.`);
+      }
     }
   }
   
